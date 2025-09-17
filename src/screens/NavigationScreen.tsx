@@ -5,7 +5,6 @@ import {
   StyleSheet,
   TouchableOpacity,
   Alert,
-  Dimensions,
   StatusBar,
   SafeAreaView,
   Platform,
@@ -13,12 +12,20 @@ import {
 } from 'react-native';
 import { useAuth } from '../contexts/AuthContext';
 import { POI } from '../types';
-import RealDevicePDRService, { PDRPosition } from '../services/pdr/RealDevicePDRService';
+// PDR Position interface - moved here to remove PDR dependency
+export interface PDRPosition {
+  x: number;
+  y: number;
+  heading: number;
+  confidence: number;
+  timestamp: number;
+  stepCount: number;
+  accuracy: number;
+}
 import QRAnchorService, { QRAnchor } from '../services/anchors/QRAnchorService';
 import NavigationService, { NavigationState } from '../services/navigation/NavigationService';
 import SimpleQRScanner from '../components/SimpleQRScanner';
 
-const { width, height } = Dimensions.get('window');
 
 interface NavigationScreenProps {
   navigation: any;
@@ -34,7 +41,6 @@ export default function NavigationScreen({ navigation, route }: NavigationScreen
   const { user } = useAuth();
   
   // Services
-  const [pdrService] = useState(() => new RealDevicePDRService());
   const [anchorService] = useState(() => new QRAnchorService());
   const [navService] = useState(() => new NavigationService());
   
@@ -44,7 +50,7 @@ export default function NavigationScreen({ navigation, route }: NavigationScreen
   });
   const [navigationState, setNavigationState] = useState<NavigationState | null>(null);
   const [showQRScanner, setShowQRScanner] = useState(false);
-  const [driftDetected, setDriftDetected] = useState(false);
+  // Drift detection removed - will be handled by new PDR implementation
   const [isCalibrating, setIsCalibrating] = useState(false);
   
   // Refs
@@ -60,27 +66,7 @@ export default function NavigationScreen({ navigation, route }: NavigationScreen
 
   const initializeNavigation = async () => {
     try {
-      // Start PDR tracking
-      pdrService.startTracking();
-      
-      // Set up PDR event handlers
-      pdrService.setOnPositionUpdate((position) => {
-        setCurrentPosition(position);
-        navService.updatePosition(position);
-      });
-      
-      pdrService.setOnDriftDetected(() => {
-        setDriftDetected(true);
-        Vibration.vibrate([0, 200, 100, 200]); // Vibration pattern for drift
-        Alert.alert(
-          'Position Drift Detected',
-          'Your position may be inaccurate. Please scan a nearby QR code to calibrate.',
-          [
-            { text: 'Scan QR Code', onPress: () => setShowQRScanner(true) },
-            { text: 'Continue Anyway', onPress: () => setDriftDetected(false) }
-          ]
-        );
-      });
+      // PDR initialization removed - will be replaced with new implementation
       
       // Set up navigation event handlers
       navService.setOnStateUpdate((state) => {
@@ -124,7 +110,7 @@ export default function NavigationScreen({ navigation, route }: NavigationScreen
   };
 
   const cleanup = () => {
-    pdrService.stopTracking();
+    // PDR cleanup removed - will be handled by new implementation
     if (positionUpdateInterval.current) {
       clearInterval(positionUpdateInterval.current);
     }
@@ -145,9 +131,8 @@ export default function NavigationScreen({ navigation, route }: NavigationScreen
       // Add anchor to service if not exists
       await anchorService.addAnchor(anchor);
       
-      // Calibrate position
+      // Calibrate position - will be handled by new PDR implementation
       const calibratedPosition = anchorService.calibratePosition(anchor, currentPosition);
-      pdrService.calibratePosition(anchor.position, calibratedPosition.heading);
       
       // Update current position
       setCurrentPosition({
@@ -157,8 +142,7 @@ export default function NavigationScreen({ navigation, route }: NavigationScreen
         stepCount: currentPosition.stepCount
       });
       
-      // Reset drift detection
-      setDriftDetected(false);
+      // Drift detection reset - will be handled by new PDR implementation
       
       // Check if this is the current target POI
       const currentPOI = navService.getNextPOI();
@@ -301,11 +285,7 @@ export default function NavigationScreen({ navigation, route }: NavigationScreen
           </Text>
         </View>
         
-        {driftDetected && (
-          <View style={styles.driftWarning}>
-            <Text style={styles.driftWarningText}>⚠️ Drift Detected - Calibration Recommended</Text>
-          </View>
-        )}
+        {/* Drift warning removed - will be handled by new PDR implementation */}
         
         {isCalibrating && (
           <View style={styles.calibratingIndicator}>
@@ -477,19 +457,7 @@ const styles = StyleSheet.create({
     color: '#333',
     fontWeight: '600',
   },
-  driftWarning: {
-    marginTop: 15,
-    padding: 10,
-    backgroundColor: '#FFF3CD',
-    borderRadius: 8,
-    borderLeftWidth: 4,
-    borderLeftColor: '#FF9800',
-  },
-  driftWarningText: {
-    color: '#856404',
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  // Drift warning styles removed - will be handled by new PDR implementation
   calibratingIndicator: {
     marginTop: 10,
     padding: 8,

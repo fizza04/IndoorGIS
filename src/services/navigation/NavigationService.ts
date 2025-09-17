@@ -1,7 +1,17 @@
 import { Alert, Vibration } from 'react-native';
 import { POI, AuditRoute } from '../../types';
-import { PDRPosition } from '../pdr/RealPDRService';
 import { QRAnchor } from '../anchors/QRAnchorService';
+
+// PDR Position interface - moved here to remove PDR dependency
+export interface PDRPosition {
+  x: number;
+  y: number;
+  heading: number;
+  confidence: number;
+  timestamp: number;
+  stepCount: number;
+  accuracy: number;
+}
 
 export interface NavigationState {
   isActive: boolean;
