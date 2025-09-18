@@ -98,8 +98,23 @@ export const auditAPI = {
   },
 
   // Essential audit session endpoints
-  startAuditSession: async (routeId: string): Promise<{ sessionId: string; status: string }> => {
+  startAuditSession: async (routeId: string): Promise<{ sessionId: string; status: string; route: any }> => {
     const response = await api.post('/auditor/session/start', { route_id: routeId });
+    return response.data;
+  },
+
+  getAuditSession: async (sessionId: string): Promise<{ 
+    session_id: string; 
+    route_id: string; 
+    auditor_id: string; 
+    session_status: string; 
+    started_at: string; 
+    ended_at: string; 
+    completed_pois: string[]; 
+    total_pois: number; 
+    last_updated: string; 
+  }> => {
+    const response = await api.get(`/auditor/session/${sessionId}`);
     return response.data;
   },
 

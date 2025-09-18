@@ -27,7 +27,10 @@ export interface POI {
   coordinates?: {
     latitude: number;
     longitude: number;
-  };
+  } | {
+    lat: number;
+    lon: number;
+  } | any; // Allow any structure for flexibility
   description?: string;
   status: 'pending' | 'completed' | 'skipped';
   buildingId: string;

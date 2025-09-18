@@ -119,13 +119,16 @@ export class QRAnchorService {
    */
   processQRData(qrData: string): QRScanResult {
     try {
+      console.log('Processing QR data:', qrData);
+      
       // Parse QR code data (could be JSON, URL, or simple ID)
       let anchorId: string;
+      let parsedData: any = null;
       
       if (qrData.startsWith('{')) {
         // JSON format
-        const data = JSON.parse(qrData);
-        anchorId = data.id || data.anchorId;
+        parsedData = JSON.parse(qrData);
+        anchorId = parsedData.id || parsedData.anchorId || parsedData.puid;
       } else if (qrData.startsWith('http')) {
         // URL format - extract ID from URL
         try {
@@ -136,29 +139,111 @@ export class QRAnchorService {
           anchorId = qrData;
         }
       } else {
-        // Simple ID format
+        // Simple ID format - could be POI name, puid, or other identifier
         anchorId = qrData;
       }
 
-      const anchor = this.knownAnchors.get(anchorId);
+      console.log('Extracted anchor ID:', anchorId);
+
+      // First try to find in known anchors
+      let anchor = this.knownAnchors.get(anchorId);
       
       if (anchor) {
+        console.log('Found in known anchors:', anchor.name);
         return {
           success: true,
           anchor: { ...anchor }
         };
-      } else {
+      }
+
+      // If not found in known anchors, try to create from POI data
+      // This handles cases where QR contains POI name like "POI 1"
+      if (anchorId && (anchorId.includes('POI') || anchorId.includes('poi'))) {
+        console.log('Detected POI QR code, creating anchor from POI data');
+        
+        // Try to find matching POI by name or ID
+        const poiAnchor = this.createAnchorFromPOI(anchorId, parsedData);
+        if (poiAnchor) {
+          console.log('Created POI anchor:', poiAnchor.name);
+          return {
+            success: true,
+            anchor: poiAnchor
+          };
+        }
+      }
+
+      // If still not found, try to create a generic anchor
+      const genericAnchor = this.createGenericAnchor(anchorId, parsedData);
+      if (genericAnchor) {
+        console.log('Created generic anchor:', genericAnchor.name);
         return {
-          success: false,
-          error: `Unknown anchor ID: ${anchorId}`
+          success: true,
+          anchor: genericAnchor
         };
       }
+
+      return {
+        success: false,
+        error: `Unknown anchor ID: ${anchorId}`
+      };
     } catch (error) {
+      console.error('QR processing error:', error);
       return {
         success: false,
         error: `Invalid QR code format: ${error}`
       };
     }
+  }
+
+  /**
+   * Create anchor from POI data
+   */
+  private createAnchorFromPOI(poiId: string, parsedData: any): QRAnchor | null {
+    // Try to extract position from parsed data if available
+    let position = { x: 0, y: 0, floor: '1' };
+    let name = poiId;
+    let buildingId = 'unknown';
+
+    if (parsedData) {
+      if (parsedData.position) {
+        position = {
+          x: parsedData.position.x || 0,
+          y: parsedData.position.y || 0,
+          floor: parsedData.position.floor || '1'
+        };
+      }
+      if (parsedData.name) {
+        name = parsedData.name;
+      }
+      if (parsedData.buildingId || parsedData.buid) {
+        buildingId = parsedData.buildingId || parsedData.buid;
+      }
+    }
+
+    return {
+      id: poiId,
+      type: 'poi',
+      position,
+      name,
+      buildingId,
+      description: `POI: ${name}`
+    };
+  }
+
+  /**
+   * Create generic anchor for unknown QR codes
+   */
+  private createGenericAnchor(anchorId: string, parsedData: any): QRAnchor | null {
+    // For now, create a generic anchor at origin
+    // In a real implementation, you might want to prompt user for position
+    return {
+      id: anchorId,
+      type: 'poi',
+      position: { x: 0, y: 0, floor: '1' },
+      name: `QR: ${anchorId}`,
+      buildingId: 'unknown',
+      description: `Scanned QR code: ${anchorId}`
+    };
   }
 
   /**
