@@ -96,25 +96,50 @@ export class DynamicSensorProcessor {
   }
 
   private startSensorSubscriptions(): void {
-    // Accelerometer
-    const accelSub = accelerometer.subscribe(({ x, y, z }) => {
-      this.sensorData.accelerometer = { x, y, z };
-      this.processAccelerometerData(x, y, z);
-    });
+    console.log('Starting sensor subscriptions...');
+    
+    try {
+      // Accelerometer
+      const accelSub = accelerometer.subscribe(
+        ({ x, y, z }) => {
+          console.log('Accelerometer data:', { x, y, z });
+          this.sensorData.accelerometer = { x, y, z };
+          this.processAccelerometerData(x, y, z);
+        },
+        (error) => {
+          console.error('Accelerometer subscription error:', error);
+        }
+      );
 
-    // Gyroscope
-    const gyroSub = gyroscope.subscribe(({ x, y, z }) => {
-      this.sensorData.gyroscope = { x, y, z };
-      this.processGyroscopeData(x, y, z);
-    });
+      // Gyroscope
+      const gyroSub = gyroscope.subscribe(
+        ({ x, y, z }) => {
+          console.log('Gyroscope data:', { x, y, z });
+          this.sensorData.gyroscope = { x, y, z };
+          this.processGyroscopeData(x, y, z);
+        },
+        (error) => {
+          console.error('Gyroscope subscription error:', error);
+        }
+      );
 
-    // Magnetometer
-    const magSub = magnetometer.subscribe(({ x, y, z }) => {
-      this.sensorData.magnetometer = { x, y, z };
-      this.processMagnetometerData(x, y, z);
-    });
+      // Magnetometer
+      const magSub = magnetometer.subscribe(
+        ({ x, y, z }) => {
+          console.log('Magnetometer data:', { x, y, z });
+          this.sensorData.magnetometer = { x, y, z };
+          this.processMagnetometerData(x, y, z);
+        },
+        (error) => {
+          console.error('Magnetometer subscription error:', error);
+        }
+      );
 
-    this.subscriptions = [accelSub, gyroSub, magSub];
+      this.subscriptions = [accelSub, gyroSub, magSub];
+      console.log('Sensor subscriptions started successfully');
+    } catch (error) {
+      console.error('Failed to start sensor subscriptions:', error);
+    }
   }
 
   private stopSensorSubscriptions(): void {
@@ -137,8 +162,16 @@ export class DynamicSensorProcessor {
       this.accStep = this.movingWindow.reduce((a, b) => a + b) / this.W;
       this.accList.push(this.accStep);
       
+      console.log('Accelerometer processing:', {
+        acc_hpf: acc_hpf.toFixed(3),
+        accStep: this.accStep.toFixed(3),
+        accListLength: this.accList.length,
+        movingWindowLength: this.movingWindow.length
+      });
+      
       if (this.accList.length === this.N) {
         this.accEvent = this.hogentStepDetectionAlgorithm();
+        console.log('Step detection result:', this.accEvent);
         this.accList = this.accList.slice(1);
       }
       this.movingWindow = this.movingWindow.slice((this.W - 1) / 2);

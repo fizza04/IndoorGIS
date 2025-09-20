@@ -33,13 +33,47 @@ export class CoordinateTransformer {
   initializeBuilding(building: Building, pois: POI[]): void {
     this.buildingId = building.id || building.bu_code || '';
     
+    console.log('Initializing coordinate transformation for building:', {
+      buildingId: this.buildingId,
+      poiCount: pois.length,
+      buildingCoords: building.coordinates
+    });
+    
     // Calculate bounds from POIs
     const poiCoordinates = pois
       .map(poi => this.extractPOICoordinates(poi))
       .filter(coord => coord !== null) as GlobalCoordinates[];
     
+    console.log('Extracted POI coordinates:', poiCoordinates.length, 'valid coordinates found');
+    
     if (poiCoordinates.length === 0) {
-      throw new Error('No valid POI coordinates found for coordinate transformation');
+      console.warn('No valid POI coordinates found, using building coordinates as fallback');
+      
+      // Fallback to building coordinates if available
+      if (building.coordinates?.latitude && building.coordinates?.longitude) {
+        const buildingLat = building.coordinates.latitude;
+        const buildingLng = building.coordinates.longitude;
+        
+        // Create a small area around the building
+        const latPadding = 0.001; // ~100m
+        const lngPadding = 0.001; // ~100m
+        
+        this.bounds = {
+          minLat: buildingLat - latPadding,
+          maxLat: buildingLat + latPadding,
+          minLng: buildingLng - lngPadding,
+          maxLng: buildingLng + lngPadding,
+          minX: 0,
+          maxX: 200, // 200m width
+          minY: 0,
+          maxY: 200  // 200m height
+        };
+        
+        console.log('Using building coordinates for bounds:', this.bounds);
+        return;
+      } else {
+        throw new Error('No valid POI coordinates found for coordinate transformation and no building coordinates available');
+      }
     }
     
     // Use POI coordinates to create building bounds if building coordinates not available
@@ -150,18 +184,49 @@ export class CoordinateTransformer {
     let longitude: number;
     let floor: number;
     
-    // Try different coordinate formats
-    if (poi.latitude && poi.longitude) {
+    console.log('Extracting coordinates from POI:', {
+      id: poi.id,
+      name: poi.name,
+      latitude: poi.latitude,
+      longitude: poi.longitude,
+      coordinates: poi.coordinates,
+      coordinates_lat: poi.coordinates_lat,
+      coordinates_lon: poi.coordinates_lon,
+      floor: poi.floor,
+      floor_number: poi.floor_number,
+      allKeys: Object.keys(poi)
+    });
+    
+    // Try different coordinate formats in order of preference
+    if (poi.latitude && poi.longitude && !isNaN(poi.latitude) && !isNaN(poi.longitude)) {
       latitude = poi.latitude;
       longitude = poi.longitude;
-    } else if (poi.coordinates?.latitude && poi.coordinates?.longitude) {
+      console.log('Using poi.latitude/longitude:', { latitude, longitude });
+    } else if (poi.coordinates?.latitude && poi.coordinates?.longitude && 
+               !isNaN(poi.coordinates.latitude) && !isNaN(poi.coordinates.longitude)) {
       latitude = poi.coordinates.latitude;
       longitude = poi.coordinates.longitude;
+      console.log('Using poi.coordinates.latitude/longitude:', { latitude, longitude });
+    } else if (poi.coordinates?.lat && poi.coordinates?.lon && 
+               !isNaN(poi.coordinates.lat) && !isNaN(poi.coordinates.lon)) {
+      latitude = poi.coordinates.lat;
+      longitude = poi.coordinates.lon;
+      console.log('Using poi.coordinates.lat/lon:', { latitude, longitude });
     } else if (poi.coordinates_lat && poi.coordinates_lon) {
       latitude = parseFloat(poi.coordinates_lat.toString());
       longitude = parseFloat(poi.coordinates_lon.toString());
+      console.log('Using poi.coordinates_lat/lon:', { latitude, longitude });
     } else {
-      return null;
+      // Try to find coordinates in any nested object
+      const possibleCoords = this.findCoordinatesInObject(poi);
+      if (possibleCoords) {
+        latitude = possibleCoords.latitude;
+        longitude = possibleCoords.longitude;
+        console.log('Using coordinates found in nested object:', { latitude, longitude });
+      } else {
+        console.warn('No valid coordinates found for POI:', poi.id);
+        return null;
+      }
     }
     
     // Extract floor number
@@ -175,9 +240,11 @@ export class CoordinateTransformer {
     
     // Validate coordinates
     if (isNaN(latitude) || isNaN(longitude) || isNaN(floor)) {
+      console.warn('Invalid coordinates after parsing:', { latitude, longitude, floor });
       return null;
     }
     
+    console.log('Successfully extracted coordinates:', { latitude, longitude, floor });
     return { latitude, longitude, floor };
   }
   
@@ -198,6 +265,32 @@ export class CoordinateTransformer {
     const dy = to.y - from.y;
     const bearing = Math.atan2(dy, dx) * (180 / Math.PI);
     return ((bearing % 360) + 360) % 360;
+  }
+
+  /**
+   * Recursively search for coordinates in any nested object
+   */
+  private findCoordinatesInObject(obj: any): { latitude: number; longitude: number } | null {
+    if (!obj || typeof obj !== 'object') return null;
+    
+    // Check for direct lat/lng properties
+    if (obj.lat && obj.lng && !isNaN(obj.lat) && !isNaN(obj.lng)) {
+      return { latitude: obj.lat, longitude: obj.lng };
+    }
+    
+    if (obj.latitude && obj.longitude && !isNaN(obj.latitude) && !isNaN(obj.longitude)) {
+      return { latitude: obj.latitude, longitude: obj.longitude };
+    }
+    
+    // Recursively search in nested objects
+    for (const key in obj) {
+      if (obj.hasOwnProperty(key) && typeof obj[key] === 'object') {
+        const result = this.findCoordinatesInObject(obj[key]);
+        if (result) return result;
+      }
+    }
+    
+    return null;
   }
   
   /**
