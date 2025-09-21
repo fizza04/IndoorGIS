@@ -15,8 +15,6 @@ import MapView, {
   Marker,
   PROVIDER_DEFAULT,
   Polyline,
-  Circle,
-  Overlay,
   AnimatedRegion,
 } from 'react-native-maps';
 import { useAuth } from '../contexts/AuthContext';
@@ -28,11 +26,9 @@ import NavigationService, {
 } from '../services/navigation/NavigationService';
 import QRScanner from '../components/QRScanner';
 import InspectionForm, { InspectionData } from '../components/InspectionForm';
-import { useSmartPDR } from '../hooks/useSmartPDR';
 import { useHogentPDR } from '../hooks/useHogentPDR';
 import { useFloorPlan } from '../hooks/useFloorPlan';
 import { HogentPDRPosition } from '../services/pdr/HogentPDRService';
-import { PDRPosition } from '../services/pdr/SmartPDRService';
 import { AndroidPermissions } from '../utils/AndroidPermissions';
 import FloorPlanOverlay from '../components/FloorPlanOverlay';
 import CompassNeedleMarker from '../components/CompassNeedleMarker';
@@ -112,28 +108,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     useState<AnimatedRegion | null>(null);
   const [isPdrPointerInitialized, setIsPdrPointerInitialized] = useState(false);
 
-  // PDR Position Update Handler
-  const handlePDRPositionUpdate = useCallback(
-    (position: PDRPosition) => {
-      // Update animated region for smooth movement
-      if (pdrAnimatedRegion && isPdrPointerInitialized) {
-        const pdrCoords = toLatLng(position.x, position.y);
-
-        if (pdrCoords.latitude !== 0 && pdrCoords.longitude !== 0) {
-          pdrAnimatedRegion
-            .timing({
-              latitude: pdrCoords.latitude,
-              longitude: pdrCoords.longitude,
-              duration: 100, // Smooth animation duration
-            })
-            .start();
-        }
-      }
-    },
-    [pdrAnimatedRegion, isPdrPointerInitialized, toLatLng],
-  );
-
-
+  // Hogent PDR - EXACT implementation
   const {
     isTracking: isPDRTracking,
     currentPosition: pdrPosition,
@@ -146,58 +121,27 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     initializeBuilding: initializePDRBuilding,
     toLatLng,
     toLocal,
-  } = useSmartPDR({
-    stepLength: 0.7,
-    updateInterval: 100,
-    enableDriftCorrection: true,
-    coordinateSystem: 'local',
-    enablePathTracking: true,
-    onPositionUpdate: handlePDRPositionUpdate,
-    onStepDetected: (count: number) => {
-      // Step detected - no logging needed
-    },
-    onDriftDetected: () => {
-      Alert.alert(
-        'Drift Detected',
-        'Please scan a QR anchor to recalibrate your position',
-      );
-    },
-  });
+  } = useHogentPDR();
 
-  // Hogent PDR - EXACT implementation using new hook
-  const {
-    isTracking: isHogentPDRTracking,
-    currentPosition: hogentPDRPosition,
-    stepCount: hogentStepCount,
-    pathHistory: hogentPathHistory,
-    startTracking: startHogentPDRTracking,
-    stopTracking: stopHogentPDRTracking,
-    calibratePosition: calibrateHogentPDRPosition,
-    reset: resetHogentPDR,
-    initializeBuilding: initializeHogentPDRBuilding,
-    toLatLng: hogentToLatLng,
-    toLocal: hogentToLocal,
-  } = useHogentPDR({
-    stepLength: 0.7,
-    updateInterval: 100,
-    enableDriftCorrection: true,
-    coordinateSystem: 'local',
-    enablePathTracking: true,
-    stepLengthScaler: 1,
-    headingOffset: 0,
-    onPositionUpdate: (position: HogentPDRPosition) => {
-      console.log(`HOGENT PDR Position: (${position.x.toFixed(2)}, ${position.y.toFixed(2)}) Heading: ${(position.heading * 180 / Math.PI).toFixed(1)}°`);
+  // PDR Position Update Handler
+  const handlePDRPositionUpdate = useCallback(
+    (position: HogentPDRPosition) => {
+      // Update animated region for smooth movement
+      if (pdrAnimatedRegion && isPdrPointerInitialized) {
+        const pdrCoords = toLatLng(position.x, position.y);
+
+        if (pdrCoords.latitude !== 0 && pdrCoords.longitude !== 0) {
+          pdrAnimatedRegion.setValue({
+            latitude: pdrCoords.latitude,
+            longitude: pdrCoords.longitude,
+            latitudeDelta: 0.001,
+            longitudeDelta: 0.001,
+          });
+        }
+      }
     },
-    onStepDetected: (count: number) => {
-      console.log(`HOGENT STEP DETECTED! Count: ${count}`);
-    },
-    onDriftDetected: () => {
-      Alert.alert(
-        'Drift Detected',
-        'Please scan a QR anchor to recalibrate your position',
-      );
-    },
-  });
+    [pdrAnimatedRegion, isPdrPointerInitialized, toLatLng],
+  );
 
   // Services
   const qrService = useRef(new QRAnchorService());
@@ -214,51 +158,8 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     };
   }, [route?.params]);
 
-  // Debug audit session state
-  useEffect(() => {
-    if (auditSession) {
-      console.log('Session ID:', auditSession.session_id);
-      console.log('Session Status:', auditSession.session_status);
-      console.log('Completed POIs:', auditSession.completed_pois);
-    }
-  }, [auditSession]);
 
-  // Debug PDR position data
-  useEffect(() => {
-    if (pdrPosition) {
-      console.log('PDR Position Update:', {
-        x: pdrPosition.x.toFixed(3),
-        y: pdrPosition.y.toFixed(3),
-        heading: pdrPosition.heading.toFixed(1),
-        stepCount: pdrPosition.stepCount,
-        confidence: pdrPosition.confidence.toFixed(2),
-        isTracking: isPDRTracking
-      });
-      
-      // Debug heading changes specifically
-      if (pdrPosition.heading !== undefined && pdrPosition.heading !== 0) {
-        console.log('🎯 PDR Heading Update:', {
-          heading: pdrPosition.heading.toFixed(1),
-          direction: ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(pdrPosition.heading / 45) % 8],
-          timestamp: new Date().toLocaleTimeString()
-        });
-      }
-    }
-  }, [pdrPosition, isPDRTracking]);
 
-  // Debug Hogent PDR position data
-  useEffect(() => {
-    if (hogentPDRPosition) {
-      console.log('Hogent PDR Position Update:', {
-        x: hogentPDRPosition.x.toFixed(3),
-        y: hogentPDRPosition.y.toFixed(3),
-        heading: hogentPDRPosition.heading.toFixed(1),
-        stepCount: hogentPDRPosition.stepCount,
-        confidence: hogentPDRPosition.confidence.toFixed(2),
-        isTracking: isHogentPDRTracking
-      });
-    }
-  }, [hogentPDRPosition, isHogentPDRTracking]);
 
   // Load floorplan when building and floor are selected
   useEffect(() => {
@@ -275,41 +176,16 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   // Initialize PDR when POIs are loaded
   useEffect(() => {
     if (selectedBuilding && pois && pois.length > 0) {
-      console.log('Initializing PDR with building and POIs:', {
-        building: selectedBuilding.bu_code || selectedBuilding.id,
-        poiCount: pois.length,
-        firstPOI: pois[0]
-      });
       
       try {
-        // Initialize both PDR systems
-        console.log('Calling initializePDRBuilding...');
+        // Initialize Hogent PDR system
         initializePDRBuilding(selectedBuilding, pois);
-        
-        console.log('Calling initializeHogentPDRBuilding...');
-        initializeHogentPDRBuilding(selectedBuilding, pois);
         
         // Auto-start PDR tracking
         if (!isPDRTracking) {
-          console.log('Auto-starting PDR tracking...');
           startPDRTracking();
-          console.log('PDR tracking started, isPDRTracking should be true now');
-        } else {
-          console.log('PDR tracking already running');
-        }
-        
-        if (!isHogentPDRTracking) {
-          console.log('Auto-starting Hogent PDR tracking...');
-          startHogentPDRTracking().then(() => {
-            console.log('Hogent PDR tracking started successfully');
-          }).catch(error => {
-            console.error('Failed to start Hogent PDR tracking:', error);
-          });
-        } else {
-          console.log('Hogent PDR tracking already running');
         }
       } catch (error) {
-        console.error('Failed to initialize PDR systems:', error);
         // Show user-friendly error message
         Alert.alert(
           'PDR Initialization Failed',
@@ -318,7 +194,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         );
       }
     }
-  }, [selectedBuilding, pois, initializePDRBuilding, initializeHogentPDRBuilding, startPDRTracking, startHogentPDRTracking, isPDRTracking, isHogentPDRTracking]);
+  }, [selectedBuilding, pois, initializePDRBuilding, startPDRTracking, isPDRTracking]);
 
   // Navigate to building when selected
   useEffect(() => {
@@ -327,7 +203,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       const lng = parseFloat(selectedBuilding.coordinates_lng || '0');
       
       if (lat !== 0 && lng !== 0) {
-        console.log('Navigating to building coordinates:', { lat, lng });
         mapRef.current.animateToRegion({
           latitude: lat,
           longitude: lng,
@@ -345,16 +220,13 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       const firstPOI = pois[0];
       const floorNumber = firstPOI.floor_number || firstPOI.floor || '1';
       
-      console.log(`Auto-loading floorplan for floor: ${floorNumber} from first POI`);
       setSelectedFloor(String(floorNumber));
       
       const buildingId = selectedBuilding.id || selectedBuilding.bu_code;
       if (buildingId) {
         loadFloorPlan(buildingId, String(floorNumber)).catch(error => {
           if (error.message.includes('Floorplan not available')) {
-            console.info('No floorplan available for this building/floor - continuing without floorplan');
           } else {
-            console.warn('Failed to load floorplan for POI floor:', error.message);
           }
         });
       }
@@ -367,7 +239,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     if (Platform.OS === 'android') {
       const result = await AndroidPermissions.checkAllPermissions();
       if (!result.granted) {
-        console.log('Android permissions not granted:', result.message);
       }
     }
   };
@@ -450,7 +321,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       }, 500);
     }
     } catch (err) {
-      console.error('Error loading initial data:', err);
       setError(
         `Failed to load data: ${
           err instanceof Error ? err.message : 'Unknown error'
@@ -473,11 +343,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           b.id === buildingId || b.bu_code === buildingId
         );
         if (building) {
-          console.log('Setting building for route:', building);
-          console.log('Building coordinates:', {
-            lat: building.coordinates?.latitude,
-            lng: building.coordinates?.longitude
-          });
           setSelectedBuilding(building);
         } else {
           // Create a mock building object if not found in list
@@ -490,13 +355,11 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
               longitude: parseFloat(route.building_lng)
             } : undefined,
           };
-          console.log('Creating mock building for route:', mockBuilding);
           setSelectedBuilding(mockBuilding);
         }
       }
       
       if (route.pois && route.pois.length > 0) {
-        console.log('Route POIs found, but checking for coordinates...');
 
         // Check if POIs have coordinates
         const hasCoordinates = route.pois.some(
@@ -504,7 +367,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         );
 
         if (hasCoordinates) {
-          console.log('POIs have coordinates, using them directly');
           setPois(route.pois);
           
           // Auto-load floorplan for first POI's floor
@@ -513,22 +375,19 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           const buildingId = route.building_id || route.bu_code || route.building_code;
           
           if (buildingId) {
-            console.log(`Auto-loading floorplan for route floor: ${floorNumber}`);
             setSelectedFloor(String(floorNumber));
             
             // Add a small delay to ensure map navigation completes first
             setTimeout(() => {
               loadFloorPlan(buildingId, String(floorNumber)).catch(error => {
                 if (error.message.includes('Floorplan not available')) {
-                  console.info('No floorplan available for this building/floor - continuing without floorplan');
                 } else {
-                  console.warn('Failed to load floorplan for route:', error.message);
+                  // console.warn('Failed to load floorplan for route:', error.message);
                 }
               });
             }, 1500);
           }
         } else {
-          console.log('POIs missing coordinates, fetching full POI data...');
           // Fetch full POI details using puids
           const fullPOIs = await fetchFullPOIDetails(route.pois);
           setPois(fullPOIs);
@@ -540,16 +399,14 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
             const buildingId = route.building_id || route.bu_code || route.building_code;
             
           if (buildingId) {
-            console.log(`Auto-loading floorplan for route floor: ${floorNumber}`);
             setSelectedFloor(String(floorNumber));
             
             // Add a small delay to ensure map navigation completes first
             setTimeout(() => {
               loadFloorPlan(buildingId, String(floorNumber)).catch(error => {
                 if (error.message.includes('Floorplan not available')) {
-                  console.info('No floorplan available for this building/floor - continuing without floorplan');
                 } else {
-                  console.warn('Failed to load floorplan for route:', error.message);
+                  // console.warn('Failed to load floorplan for route:', error.message);
                 }
               });
             }, 1500);
@@ -572,16 +429,14 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
               
               // Auto-load floorplan for the floor
               if (floorNumber) {
-                console.log(`Auto-loading floorplan for route floor: ${floorNumber}`);
                 setSelectedFloor(String(floorNumber));
                 
                 // Add a small delay to ensure map navigation completes first
                 setTimeout(() => {
                   loadFloorPlan(buildingId, String(floorNumber)).catch(error => {
                     if (error.message.includes('Floorplan not available')) {
-                      console.info('No floorplan available for this building/floor - continuing without floorplan');
                     } else {
-                      console.warn('Failed to load floorplan for route floor:', error.message);
+                      // console.warn('Failed to load floorplan for route floor:', error.message);
                     }
                   });
                 }, 1500);
@@ -590,7 +445,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
               setPois([]);
             }
           } catch (poiError) {
-            console.error('Error fetching POIs:', poiError);
+            // console.error('Error fetching POIs:', poiError);
             setPois([]);
           }
         } else {
@@ -598,7 +453,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         }
       }
     } catch (error) {
-      console.error('Error loading route POIs:', error);
+      // console.error('Error loading route POIs:', error);
     }
   };
 
@@ -628,8 +483,8 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
       return response.sessionId;
     } catch (error: any) {
-      console.error('Error starting audit session:', error);
-      console.error('Error details:', error.response?.data || error.message);
+      // console.error('Error starting audit session:', error);
+      // console.error('Error details:', error.response?.data || error.message);
       Alert.alert(
         'Error',
         `Failed to start audit session: ${
@@ -645,7 +500,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     if (!auditSession?.session_id) return;
 
     try {
-      console.log('Ending audit session:', auditSession.session_id);
       await auditAPI.endAuditSession(auditSession.session_id);
 
       // Fetch updated session data from backend
@@ -664,7 +518,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         'Audit session has been completed successfully!',
       );
     } catch (error: any) {
-      console.error('Error ending audit session:', error);
+      // console.error('Error ending audit session:', error);
       Alert.alert(
         'Error',
         `Failed to end audit session: ${
@@ -676,12 +530,10 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
   // Submit POI inspection data - fully dynamic
   const submitPOIInspection = async (inspectionData: InspectionData) => {
-    console.log('submitPOIInspection called with:', inspectionData);
-    console.log('Current audit session state:', auditSession);
 
     if (!auditSession?.session_id) {
-      console.error('No audit session found');
-      console.error('Audit session state:', auditSession);
+      // console.error('No audit session found');
+      // console.error('Audit session state:', auditSession);
       Alert.alert(
         'Error',
         'No active audit session found. Please select a route first.',
@@ -690,16 +542,12 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     }
 
     try {
-      console.log('Submitting POI inspection:', inspectionData);
-      console.log('Session ID:', auditSession.session_id);
-      console.log('POI ID:', inspectionData.poiId);
 
       const response = await auditAPI.submitPOIAudit(
         auditSession.session_id,
         inspectionData.poiId,
         inspectionData,
       );
-      console.log('Server response:', response);
 
       // Fetch updated session data from backend instead of updating local state
       const updatedSession = await auditAPI.getAuditSession(
@@ -707,12 +555,10 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       );
       setAuditSession(updatedSession);
 
-      console.log('POI inspection submitted successfully');
-      console.log('Updated session data from backend:', updatedSession);
       return true;
     } catch (error: any) {
-      console.error('Error submitting POI inspection:', error);
-      console.error('Error details:', error.response?.data || error.message);
+      // console.error('Error submitting POI inspection:', error);
+      // console.error('Error details:', error.response?.data || error.message);
       Alert.alert(
         'Error',
         `Failed to submit inspection data: ${
@@ -729,27 +575,25 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     for (const routePOI of routePOIs) {
       try {
         if (routePOI.puid) {
-          console.log(`Fetching full details for POI: ${routePOI.puid}`);
           const fullPOI = await poiAPI.getPOI(routePOI.puid);
           
           // Debug: Log the full POI data structure
-          console.log('Full POI data structure:', {
-            id: fullPOI.id,
-            name: fullPOI.name,
-            latitude: fullPOI.latitude,
-            longitude: fullPOI.longitude,
-            coordinates: fullPOI.coordinates,
-            coordinates_lat: fullPOI.coordinates_lat,
-            coordinates_lon: fullPOI.coordinates_lon,
-            floor: fullPOI.floor,
-            floor_number: fullPOI.floor_number,
-            allKeys: Object.keys(fullPOI)
-          });
+          //   id: fullPOI.id,
+          //   name: fullPOI.name,
+          //   latitude: fullPOI.latitude,
+          //   longitude: fullPOI.longitude,
+          //   coordinates: fullPOI.coordinates,
+          //   coordinates_lat: fullPOI.coordinates_lat,
+          //   coordinates_lon: fullPOI.coordinates_lon,
+          //   floor: fullPOI.floor,
+          //   floor_number: fullPOI.floor_number,
+          //   allKeys: Object.keys(fullPOI)
+          // });
           
           fullPOIs.push(fullPOI);
         }
       } catch (error) {
-        console.error(`Error fetching POI ${routePOI.puid}:`, error);
+        // console.error(`Error fetching POI ${routePOI.puid}:`, error);
         // Add the route POI as fallback
         fullPOIs.push(routePOI);
       }
@@ -776,12 +620,11 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           // Auto-load floorplan for first available floor
           if (building.floors && building.floors.length > 0) {
             const firstFloor = String(building.floors[0]);
-            console.log(`Auto-loading floorplan for building's first floor: ${firstFloor}`);
             setSelectedFloor(firstFloor);
             loadFloorPlan(buildingId, firstFloor);
           }
         } catch (err) {
-          console.error('Error loading POIs:', err);
+          // console.error('Error loading POIs:', err);
           setPois([]);
         }
       }
@@ -795,17 +638,13 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         });
       }
     } catch (err) {
-      console.error('Error selecting building:', err);
+      // console.error('Error selecting building:', err);
       Alert.alert('Error', 'Failed to load building details');
     }
   };
 
   const handleRouteSelect = async (route: AuditRoute) => {
-    console.log('Route selected:', route);
-    console.log('Route POIs:', route.pois);
     if (route.pois && route.pois.length > 0) {
-      console.log('First POI details:', route.pois[0]);
-      console.log('First POI coordinates:', route.pois[0].coordinates);
     }
     setSelectedRoute(route);
 
@@ -860,12 +699,9 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     // Check if we have POIs with coordinates
     if (pois && pois.length > 0) {
       const firstPOI = pois[0];
-      console.log('First POI after loading:', firstPOI);
       const coordinates = getTransformedPOICoordinates(firstPOI);
-      console.log('Transformed coordinates:', coordinates);
 
       if (coordinates && mapRef.current) {
-        console.log('Navigating to POI coordinates:', coordinates);
         mapRef.current.animateToRegion({
           latitude: coordinates.latitude,
           longitude: coordinates.longitude,
@@ -897,12 +733,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       const building = buildings.find(
         b => b.id === route.building_id || b.bu_code === route.building_id,
       );
-      console.log('No POI coordinates, trying building:', building);
       if (building && building.coordinates && mapRef.current) {
-        console.log(
-          'Navigating to building coordinates:',
-          building.coordinates,
-        );
         mapRef.current.animateToRegion({
           latitude: building.coordinates.latitude,
           longitude: building.coordinates.longitude,
@@ -952,7 +783,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         );
       }
     } catch (error) {
-      console.error('QR scan error:', error);
+      // console.error('QR scan error:', error);
       Alert.alert('Error', 'Failed to process QR code');
     }
   };
@@ -960,18 +791,14 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   const handleAnchorScanned = (anchor: QRAnchor) => {
     setShowQRScanner(false);
 
-    console.log('Anchor scanned:', anchor);
 
     // Try to find matching POI by name or ID
     const matchingPOI = findPOIByNameOrId(anchor.name, anchor.id);
 
     if (matchingPOI) {
-      console.log('Found matching POI:', matchingPOI.name);
 
       // Get POI coordinates
-      console.log('Getting POI coordinates for:', matchingPOI);
       const poiCoords = getTransformedPOICoordinates(matchingPOI);
-      console.log('POI coordinates result:', poiCoords);
       if (poiCoords) {
         // Find the index of this POI in the route
         const poiIndex = pois.findIndex(
@@ -990,8 +817,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           return;
         }
 
-        console.log(`Scanned POI: ${matchingPOI.name} (Index: ${poiIndex})`);
-        console.log(`Current POI Index: ${currentPOIIndex}`);
 
         // Check if this is the correct POI in sequence
         if (poiIndex !== currentPOIIndex) {
@@ -1009,21 +834,12 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         // Convert lat/lng to local coordinates for PDR
         const localCoords = toLocal(poiCoords.latitude, poiCoords.longitude);
 
-        // Calibrate PDR position using POI coordinates
-        calibratePDRPosition(localCoords.x, localCoords.y, anchor.heading);
-
         // Calibrate Hogent PDR position using POI coordinates
-        calibrateHogentPDRPosition(localCoords.x, localCoords.y, anchor.heading);
+        calibratePDRPosition(localCoords.x, localCoords.y, anchor.heading);
 
         // Set PDR starting position for indoor positioning
         setPdrStartPosition(poiCoords);
 
-        console.log(
-          `PDR calibrated to POI: ${matchingPOI.name} at local (${localCoords.x}, ${localCoords.y})`,
-        );
-        console.log(
-          `PDR starting position set to: (${poiCoords.latitude}, ${poiCoords.longitude})`,
-        );
 
         // If we have a selected route, start navigation to next POI
         if (selectedRoute && pois && pois.length > 0) {
@@ -1045,7 +861,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       const { x, y } = anchor.position;
       calibratePDRPosition(x, y, anchor.heading);
 
-        console.log(`PDR calibrated to anchor: (${x}, ${y})`);
 
     Alert.alert(
       'Position Calibrated',
@@ -1080,12 +895,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
        }
        startPDRTracking();
        
-       // Start Hogent PDR tracking
-      startHogentPDRTracking().then(() => {
-        console.log('Hogent PDR tracking started');
-      }).catch((error) => {
-        console.error('Failed to start Hogent PDR tracking:', error);
-      });
+       // Hogent PDR is already started above
      }
   };
 
@@ -1100,12 +910,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   };
 
   const moveToNextPOI = () => {
-    console.log(
-      'moveToNextPOI called. Current index:',
-      currentPOIIndex,
-      'Total POIs:',
-      pois.length,
-    );
 
     if (currentPOIIndex < pois.length - 1) {
       // Mark current POI as completed
@@ -1114,24 +918,18 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       // Move to next POI
       const newIndex = currentPOIIndex + 1;
       setCurrentPOIIndex(newIndex);
-      console.log(
-        `Moved to next POI: ${getCurrentPOI()?.name} (Index: ${newIndex})`,
-      );
     } else {
       // Mark last POI as completed
       setCompletedPOIs(prev => new Set([...prev, currentPOIIndex]));
 
       // All POIs completed
       setIsNavigating(false);
-      console.log('All POIs completed!');
       Alert.alert('Route Complete', 'All POIs have been visited!');
     }
   };
 
   // Handle inspection form submission
   const handleInspectionSubmit = async (inspectionData: InspectionData) => {
-    console.log('Submitting inspection data:', inspectionData);
-    console.log('Current POI index before submission:', currentPOIIndex);
 
     // Submit to server
     const success = await submitPOIInspection(inspectionData);
@@ -1149,14 +947,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           poi.puid === inspectionData.poiId ||
           poi.id === inspectionData.poiId,
       );
-      console.log(
-        'Found POI index:',
-        poiIndex,
-        'for POI ID:',
-        inspectionData.poiId,
-      );
-      console.log('Current POI index:', currentPOIIndex);
-      console.log('Completed POIs from backend:', auditSession?.completed_pois);
 
       if (poiIndex !== -1) {
         // Update local completed POIs set based on backend data
@@ -1171,23 +961,15 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
         // Move to next POI if this was the current one
         if (poiIndex === currentPOIIndex) {
-          console.log('Moving to next POI from index:', currentPOIIndex);
           moveToNextPOI();
         } else {
-          console.log(
-            'POI index mismatch. Current:',
-            currentPOIIndex,
-            'Submitted:',
-            poiIndex,
-          );
           // Force update to next POI if there's a mismatch
           if (poiIndex < currentPOIIndex) {
-            console.log('POI already completed, moving to next');
             moveToNextPOI();
           }
         }
       } else {
-        console.error('POI not found in route for ID:', inspectionData.poiId);
+        // console.error('POI not found in route for ID:', inspectionData.poiId);
       }
 
       // Show success message
@@ -1234,26 +1016,15 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     // Only return POI if it's within reasonable distance (e.g., 10 meters)
     const threshold = 0.0001; // Roughly 10 meters in lat/lng
     if (minDistance < threshold) {
-      console.log(
-        `Found closest POI: ${closestPOI?.name} at distance: ${minDistance}`,
-      );
       return closestPOI;
     }
 
-    console.log(
-      `No POI found within threshold. Closest distance: ${minDistance}`,
-    );
     return null;
   };
 
   const findPOIByNameOrId = (name: string, id: string): POI | null => {
     if (!pois || pois.length === 0) return null;
 
-    console.log(`Searching for POI with name: "${name}" or id: "${id}"`);
-    console.log(
-      'Available POIs:',
-      pois.map(p => ({ name: p.name, puid: p.puid, id: p.id })),
-    );
 
     // Try to find by exact name match first
     let matchingPOI = pois.find(
@@ -1265,7 +1036,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     );
 
     if (matchingPOI) {
-      console.log(`Found POI by name: ${matchingPOI.name}`);
       return matchingPOI;
     }
 
@@ -1279,7 +1049,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     );
 
     if (matchingPOI) {
-      console.log(`Found POI by ID: ${matchingPOI.name}`);
       return matchingPOI;
     }
 
@@ -1293,11 +1062,9 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     );
 
     if (matchingPOI) {
-      console.log(`Found POI by partial name match: ${matchingPOI.name}`);
       return matchingPOI;
     }
 
-    console.log(`No POI found matching "${name}" or "${id}"`);
     return null;
   };
 
@@ -1375,7 +1142,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   // Get complete PDR path including starting position - BREADCRUMB TRAIL
   const getCompletePDRPath = () => {
     if (!pdrStartPosition) {
-      console.log('PDR Breadcrumb Trail: No starting position');
       return [];
     }
 
@@ -1397,13 +1163,10 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       
       // Add all path points to create the breadcrumb trail
       completePath.push(...pathPoints);
-      console.log(`PDR Breadcrumb Trail: ${completePath.length} points, showing path walked`);
       
       // Debug: Show first few path points
       if (pathPoints.length > 0) {
-        console.log(`First path point: (${pathPoints[0].latitude.toFixed(6)}, ${pathPoints[0].longitude.toFixed(6)})`);
         if (pathPoints.length > 1) {
-          console.log(`Last path point: (${pathPoints[pathPoints.length - 1].latitude.toFixed(6)}, ${pathPoints[pathPoints.length - 1].longitude.toFixed(6)})`);
         }
       }
     }
@@ -1426,7 +1189,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
   const getTransformedPOICoordinates = (poi: POI) => {
     if (!poi) {
-      console.log('POI is null or undefined');
       return null;
     }
 
@@ -1471,16 +1233,14 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
     try {
       navService.current.startRoute(selectedRoute, selectedRoute.pois);
-      console.log('Navigation started');
     } catch (error) {
-      console.error('Failed to start navigation:', error);
+      // console.error('Failed to start navigation:', error);
       Alert.alert('Error', 'Failed to start navigation');
     }
   };
 
   const stopNavigation = () => {
     navService.current.stopRoute();
-    console.log('Navigation stopped');
   };
 
   if (loading) {
@@ -1721,15 +1481,10 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
               style={[styles.pdrCardButton, styles.pdrCardButtonInit]}
               onPress={() => {
                 try {
-                  console.log('Manual PDR initialization...');
                   initializePDRBuilding(selectedBuilding, pois);
-                  initializeHogentPDRBuilding(selectedBuilding, pois);
                   startPDRTracking();
-                  startHogentPDRTracking().catch(error => {
-                    console.error('Failed to start Hogent PDR tracking:', error);
-                  });
                 } catch (error) {
-                  console.error('Manual PDR initialization failed:', error);
+                  // console.error('Manual PDR initialization failed:', error);
                   Alert.alert('PDR Initialization Failed', 'Please check POI coordinates and try again.');
                 }
               }}
@@ -1739,63 +1494,8 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
             </TouchableOpacity>
           )}
 
-          {/* Test PDR movement button */}
-          {isPDRTracking && (
-            <TouchableOpacity
-              style={[styles.pdrCardButton, styles.pdrCardButtonTest]}
-              onPress={() => {
-                console.log('Testing PDR movement...');
-                // Simulate a step by manually updating position
-                if (pdrPosition) {
-                  const newX = pdrPosition.x + 0.5; // Move 0.5m east
-                  const newY = pdrPosition.y + 0.3; // Move 0.3m north
-                  const newHeading = (pdrPosition.heading + 15) % 360; // Turn 15 degrees
-                  
-                  console.log('Simulated movement:', {
-                    from: { x: pdrPosition.x, y: pdrPosition.y, heading: pdrPosition.heading },
-                    to: { x: newX, y: newY, heading: newHeading }
-                  });
-                  
-                  // This is just for testing - in real PDR, this would be handled by the service
-                  Alert.alert('Test Movement', `Moved to (${newX.toFixed(2)}, ${newY.toFixed(2)}) heading ${newHeading.toFixed(1)}°`);
-                } else {
-                  console.log('No PDR position available for testing');
-                  Alert.alert('No PDR Position', 'PDR position is not available. Make sure PDR is initialized and tracking.');
-                }
-              }}
-            >
-              <Text style={styles.pdrCardButtonIcon}>🧪</Text>
-              <Text style={styles.pdrCardButtonText}>Test Move</Text>
-            </TouchableOpacity>
-          )}
 
 
-          {/* Debug PDR status button */}
-          <TouchableOpacity
-            style={[styles.pdrCardButton, styles.pdrCardButtonDebug]}
-            onPress={() => {
-              console.log('=== PDR DEBUG STATUS ===');
-              console.log('isPDRTracking:', isPDRTracking);
-              console.log('isHogentPDRTracking:', isHogentPDRTracking);
-              console.log('pdrPosition:', pdrPosition);
-              console.log('stepCount:', stepCount);
-              console.log('selectedBuilding:', selectedBuilding);
-              console.log('pois count:', pois?.length || 0);
-              console.log('first POI:', pois?.[0]);
-              
-              Alert.alert(
-                'PDR Debug Status',
-                `PDR Tracking: ${isPDRTracking ? 'ON' : 'OFF'}\n` +
-                `Hogent PDR: ${isHogentPDRTracking ? 'ON' : 'OFF'}\n` +
-                `Position: ${pdrPosition ? `(${pdrPosition.x.toFixed(2)}, ${pdrPosition.y.toFixed(2)})` : 'None'}\n` +
-                `Steps: ${stepCount || 0}\n` +
-                `POIs: ${pois?.length || 0}`
-              );
-            }}
-          >
-            <Text style={styles.pdrCardButtonIcon}>🔍</Text>
-            <Text style={styles.pdrCardButtonText}>Debug</Text>
-          </TouchableOpacity>
 
           {selectedRoute && (
                       <TouchableOpacity
@@ -1887,9 +1587,9 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
                     </Text>
                 </View>
             <View style={styles.pdrValueItem}>
-              <Text style={styles.pdrValueLabel}>Hogent Steps:</Text>
+              <Text style={styles.pdrValueLabel}>Hogent PDR Steps:</Text>
               <Text style={[styles.pdrValueText, { color: '#00FF00' }]}>
-                {hogentStepCount}
+                {stepCount}
                     </Text>
             </View>
             <View style={styles.pdrValueItem}>
@@ -1942,10 +1642,10 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           {/* Floorplan Overlay */}
           {floorPlan && floorPlan.floor_plan_base64_data && (
             <>
-              {console.log('MapScreen passing bounds to FloorPlanOverlay:', {
+              {/* console.log('MapScreen passing bounds to FloorPlanOverlay:', {
                 northEast: { lat: floorPlan.top_right_lat, lng: floorPlan.top_right_lng },
                 southWest: { lat: floorPlan.bottom_left_lat, lng: floorPlan.bottom_left_lng }
-              })}
+              }) */}
               <FloorPlanOverlay
                 imageUri={`data:image/png;base64,${floorPlan.floor_plan_base64_data}`}
                 bounds={{
@@ -2018,38 +1718,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     />
   )}
 
-  {/* COORDINATE SYSTEM TEST - Visual test markers */}
-  {isPDRTracking && pdrStartPosition && (
-    <>
-      {/* North marker */}
-      <Marker
-        coordinate={{
-          latitude: pdrStartPosition.latitude + 0.0001,
-          longitude: pdrStartPosition.longitude
-        }}
-        title="North Test"
-        description="Should be North of starting point"
-      >
-        <View style={styles.testMarker}>
-          <Text style={styles.testMarkerText}>N</Text>
-              </View>
-      </Marker>
-      
-      {/* East marker */}
-      <Marker
-        coordinate={{
-          latitude: pdrStartPosition.latitude,
-          longitude: pdrStartPosition.longitude + 0.0001
-        }}
-        title="East Test"
-        description="Should be East of starting point"
-      >
-        <View style={styles.testMarker}>
-          <Text style={styles.testMarkerText}>E</Text>
-          </View>
-      </Marker>
-    </>
-  )}
 
 
   {/* PDR BREADCRUMB MARKERS - Small dots along the path */}
@@ -2072,18 +1740,29 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   })}
 
   {/* LIVE USER COMPASS MARKER - Single marker showing user position and direction */}
-  {((isPDRTracking && pdrPosition && pdrStartPosition) || (isHogentPDRTracking && hogentPDRPosition && pdrStartPosition)) && (
-    <CompassNeedleMarker
-      key="live-user-compass"
-      coordinate={{
-        latitude: pdrStartPosition.latitude + ((pdrPosition?.x || hogentPDRPosition?.x || 0) * 0.00001),
-        longitude: pdrStartPosition.longitude + ((pdrPosition?.y || hogentPDRPosition?.y || 0) * 0.00001)
-      }}
-      heading={pdrPosition?.heading !== undefined ? pdrPosition.heading : (hogentPDRPosition?.heading !== undefined ? hogentPDRPosition.heading : 0)}
-      size={32}
-      showDebug={false}
-    />
-  )}
+  {((isPDRTracking && pdrPosition && pdrStartPosition)) && (() => {
+    let finalHeading = pdrPosition?.heading !== undefined ? pdrPosition.heading : 0;
+    
+    // Normalize heading to 0-360 range
+    if (finalHeading > 360) {
+      finalHeading = finalHeading % 360;
+    } else if (finalHeading < 0) {
+      finalHeading = ((finalHeading % 360) + 360) % 360;
+    }
+    
+    return (
+      <CompassNeedleMarker
+        key="live-user-compass"
+        coordinate={{
+          latitude: pdrStartPosition.latitude + ((pdrPosition?.x || 0) * 0.00001),
+          longitude: pdrStartPosition.longitude + ((pdrPosition?.y || 0) * 0.00001)
+        }}
+        heading={finalHeading}
+        size={32}
+        showDebug={false}
+      />
+    );
+  })()}
 
 
   {/* Dynamic POI Markers - Color based on status */}
@@ -2313,12 +1992,6 @@ const styles = StyleSheet.create({
   pdrCardButtonInit: {
     backgroundColor: '#FF9800',
   },
-  pdrCardButtonTest: {
-    backgroundColor: '#9C27B0',
-  },
-  pdrCardButtonDebug: {
-    backgroundColor: '#607D8B',
-  },
   pdrCardButtonHeading: {
     backgroundColor: '#4CAF50',
   },
@@ -2482,41 +2155,6 @@ const styles = StyleSheet.create({
     borderBottomColor: '#007AFF',
   },
 
-  // Test Marker Styles
-  testMarker: {
-    backgroundColor: '#FF0000',
-    padding: 8,
-    borderRadius: 4,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  testMarkerText: {
-    color: '#FFFFFF',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-
-  // Test Marker Styles - For coordinate system verification
-  testMarker: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#00FF00',
-    borderWidth: 3,
-    borderColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.5,
-    shadowRadius: 4,
-    elevation: 6,
-  },
-  testMarkerText: {
-    color: '#000000',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
 
   // Breadcrumb Marker Styles - Small dots along the path
   breadcrumbMarker: {
@@ -2556,28 +2194,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
   },
 
-  // Hogent PDR Position Marker Styles - Green dot for EXACT Hogent implementation
-  hogentPDRPositionMarker: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#00FF00',
-    borderWidth: 4,
-    borderColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.6,
-    shadowRadius: 6,
-    elevation: 8,
-  },
-  hogentPDRPositionMarkerInner: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#FFFFFF',
-  },
 
   // Floor Selector Styles
   floorSelector: {

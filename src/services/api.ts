@@ -211,7 +211,7 @@ export const floorPlanAPI = {
             zoom: 19,
           };
           
-          console.log(`Floorplan loaded with mock coordinates for building ${buildingId}, floor ${floorNumber}:`, coordinates);
+          // Mock coordinates loaded
           
           return {
             floor_plan_base64_data: base64,

@@ -43,7 +43,6 @@ export const useFloorPlan = (): UseFloorPlanReturn => {
 
       setFloorPlan(floorPlanData);
     } catch (err) {
-      console.error('Error loading floorplan:', err);
       setError(err instanceof Error ? err.message : 'Failed to load floorplan');
       setFloorPlan(null);
     } finally {

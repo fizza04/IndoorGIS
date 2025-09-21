@@ -33,18 +33,12 @@ export class CoordinateTransformer {
   initializeBuilding(building: Building, pois: POI[]): void {
     this.buildingId = building.id || building.bu_code || '';
     
-    console.log('Initializing coordinate transformation for building:', {
-      buildingId: this.buildingId,
-      poiCount: pois.length,
-      buildingCoords: building.coordinates
-    });
     
     // Calculate bounds from POIs
     const poiCoordinates = pois
       .map(poi => this.extractPOICoordinates(poi))
       .filter(coord => coord !== null) as GlobalCoordinates[];
     
-    console.log('Extracted POI coordinates:', poiCoordinates.length, 'valid coordinates found');
     
     if (poiCoordinates.length === 0) {
       console.warn('No valid POI coordinates found, using building coordinates as fallback');
@@ -69,7 +63,6 @@ export class CoordinateTransformer {
           maxY: 200  // 200m height
         };
         
-        console.log('Using building coordinates for bounds:', this.bounds);
         return;
       } else {
         throw new Error('No valid POI coordinates found for coordinate transformation and no building coordinates available');
@@ -78,7 +71,6 @@ export class CoordinateTransformer {
     
     // Use POI coordinates to create building bounds if building coordinates not available
     if (!building.coordinates) {
-      console.log('Building coordinates not available, using POI coordinates for bounds');
     }
     
     // Calculate bounds
@@ -184,45 +176,28 @@ export class CoordinateTransformer {
     let longitude: number;
     let floor: number;
     
-    console.log('Extracting coordinates from POI:', {
-      id: poi.id,
-      name: poi.name,
-      latitude: poi.latitude,
-      longitude: poi.longitude,
-      coordinates: poi.coordinates,
-      coordinates_lat: poi.coordinates_lat,
-      coordinates_lon: poi.coordinates_lon,
-      floor: poi.floor,
-      floor_number: poi.floor_number,
-      allKeys: Object.keys(poi)
-    });
     
     // Try different coordinate formats in order of preference
     if (poi.latitude && poi.longitude && !isNaN(poi.latitude) && !isNaN(poi.longitude)) {
       latitude = poi.latitude;
       longitude = poi.longitude;
-      console.log('Using poi.latitude/longitude:', { latitude, longitude });
     } else if (poi.coordinates?.latitude && poi.coordinates?.longitude && 
                !isNaN(poi.coordinates.latitude) && !isNaN(poi.coordinates.longitude)) {
       latitude = poi.coordinates.latitude;
       longitude = poi.coordinates.longitude;
-      console.log('Using poi.coordinates.latitude/longitude:', { latitude, longitude });
     } else if (poi.coordinates?.lat && poi.coordinates?.lon && 
                !isNaN(poi.coordinates.lat) && !isNaN(poi.coordinates.lon)) {
       latitude = poi.coordinates.lat;
       longitude = poi.coordinates.lon;
-      console.log('Using poi.coordinates.lat/lon:', { latitude, longitude });
     } else if (poi.coordinates_lat && poi.coordinates_lon) {
       latitude = parseFloat(poi.coordinates_lat.toString());
       longitude = parseFloat(poi.coordinates_lon.toString());
-      console.log('Using poi.coordinates_lat/lon:', { latitude, longitude });
     } else {
       // Try to find coordinates in any nested object
       const possibleCoords = this.findCoordinatesInObject(poi);
       if (possibleCoords) {
         latitude = possibleCoords.latitude;
         longitude = possibleCoords.longitude;
-        console.log('Using coordinates found in nested object:', { latitude, longitude });
       } else {
         console.warn('No valid coordinates found for POI:', poi.id);
         return null;
@@ -244,7 +219,6 @@ export class CoordinateTransformer {
       return null;
     }
     
-    console.log('Successfully extracted coordinates:', { latitude, longitude, floor });
     return { latitude, longitude, floor };
   }
   
@@ -340,5 +314,19 @@ export class CoordinateTransformer {
   reset(): void {
     this.bounds = null;
     this.buildingId = null;
+  }
+
+  /**
+   * Convert local coordinates to lat/lng (alias for localToLatLng)
+   */
+  toLatLng(x: number, y: number): { latitude: number; longitude: number } {
+    return this.localToLatLng(x, y);
+  }
+
+  /**
+   * Convert lat/lng to local coordinates (alias for latLngToLocal)
+   */
+  toLocal(latitude: number, longitude: number): { x: number; y: number } {
+    return this.latLngToLocal(latitude, longitude);
   }
 }

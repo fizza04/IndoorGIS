@@ -1,46 +1,26 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { HogentPDRService, HogentPDRPosition, HogentPDRConfig } from '../services/pdr/HogentPDRService';
-
-export interface UseHogentPDRConfig extends HogentPDRConfig {
-  enableAutoStart?: boolean;
-  enablePathTracking?: boolean;
-  onPositionUpdate?: (position: HogentPDRPosition) => void;
-  onStepDetected?: (stepCount: number) => void;
-  onDriftDetected?: () => void;
-}
+import { HogentPDRService, HogentPDRPosition } from '../services/pdr/HogentPDRService';
 
 export interface UseHogentPDRReturn {
   // PDR State
   isTracking: boolean;
   currentPosition: HogentPDRPosition;
   stepCount: number;
-  pathHistory: Array<{ x: number; y: number; timestamp: number }>;
+  pathHistory: HogentPDRPosition[];
   
   // PDR Controls
   startTracking: () => Promise<void>;
   stopTracking: () => void;
   calibratePosition: (x: number, y: number, heading?: number) => void;
   reset: () => void;
-  initializeBuilding: (building: any, pois: any[]) => void;
+  initializeBuilding: (building: any, pois: any[]) => Promise<void>;
   
   // Utility functions
   toLatLng: (x: number, y: number) => { latitude: number; longitude: number };
   toLocal: (latitude: number, longitude: number) => { x: number; y: number };
-  exportPathData: () => string;
 }
 
-export function useHogentPDR(config: UseHogentPDRConfig = {}): UseHogentPDRReturn {
-  // Default configuration
-  const defaultConfig: HogentPDRConfig = {
-    stepLength: 0.7, // 70cm per step
-    updateInterval: 100, // 100ms
-    enableDriftCorrection: true,
-    coordinateSystem: 'local',
-    stepLengthScaler: 1,
-    headingOffset: 0,
-    ...config
-  };
-
+export function useHogentPDR(): UseHogentPDRReturn {
   // PDR Service instance
   const pdrServiceRef = useRef<HogentPDRService | null>(null);
   
@@ -56,27 +36,22 @@ export function useHogentPDR(config: UseHogentPDRConfig = {}): UseHogentPDRRetur
     accuracy: 0
   });
   const [stepCount, setStepCount] = useState(0);
-  const [pathHistory, setPathHistory] = useState<Array<{ x: number; y: number; timestamp: number }>>([]);
+  const [pathHistory, setPathHistory] = useState<HogentPDRPosition[]>([]);
 
   // Initialize PDR service
   useEffect(() => {
     if (!pdrServiceRef.current) {
-      pdrServiceRef.current = new HogentPDRService(defaultConfig);
+      pdrServiceRef.current = new HogentPDRService();
       
       // Set up callbacks
       pdrServiceRef.current.setOnPositionUpdate((position) => {
         setCurrentPosition(position);
         setStepCount(position.stepCount);
-        config.onPositionUpdate?.(position);
+        setPathHistory(prev => [...prev, position]);
       });
 
       pdrServiceRef.current.setOnStepDetected((count) => {
         setStepCount(count);
-        config.onStepDetected?.(count);
-      });
-
-      pdrServiceRef.current.setOnDriftDetected(() => {
-        config.onDriftDetected?.();
       });
     }
 
@@ -87,29 +62,13 @@ export function useHogentPDR(config: UseHogentPDRConfig = {}): UseHogentPDRRetur
     };
   }, []);
 
-  // Update path history when position changes
-  useEffect(() => {
-    if (config.enablePathTracking !== false && pdrServiceRef.current) {
-      const newPathHistory = pdrServiceRef.current.getPathHistory();
-      setPathHistory(newPathHistory);
-    }
-  }, [currentPosition, config.enablePathTracking]);
-
-  // Auto-start if enabled
-  useEffect(() => {
-    if (config.enableAutoStart && pdrServiceRef.current && !isTracking) {
-      startTracking();
-    }
-  }, [config.enableAutoStart]);
-
   // PDR Controls
   const startTracking = useCallback(async () => {
     if (pdrServiceRef.current && !isTracking) {
       try {
-        await pdrServiceRef.current.startTracking();
+        pdrServiceRef.current.startTracking();
         setIsTracking(true);
       } catch (error) {
-        console.error('Failed to start Hogent PDR tracking:', error);
       }
     }
   }, [isTracking]);
@@ -145,9 +104,9 @@ export function useHogentPDR(config: UseHogentPDRConfig = {}): UseHogentPDRRetur
     }
   }, []);
 
-  const initializeBuilding = useCallback((building: any, pois: any[]) => {
+  const initializeBuilding = useCallback(async (building: any, pois: any[]) => {
     if (pdrServiceRef.current) {
-      pdrServiceRef.current.initializeBuilding(building, pois);
+      await pdrServiceRef.current.initializeBuilding(building, pois);
     }
   }, []);
 
@@ -158,10 +117,6 @@ export function useHogentPDR(config: UseHogentPDRConfig = {}): UseHogentPDRRetur
 
   const toLocal = useCallback((latitude: number, longitude: number) => {
     return pdrServiceRef.current?.toLocal(latitude, longitude) || { x: 0, y: 0 };
-  }, []);
-
-  const exportPathData = useCallback(() => {
-    return pdrServiceRef.current?.exportPathData() || '{}';
   }, []);
 
   return {
@@ -180,7 +135,6 @@ export function useHogentPDR(config: UseHogentPDRConfig = {}): UseHogentPDRRetur
     
     // Utility functions
     toLatLng,
-    toLocal,
-    exportPathData
+    toLocal
   };
 }

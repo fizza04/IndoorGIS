@@ -26,14 +26,7 @@ const FloorPlanOverlay: React.FC<FloorPlanOverlayProps> = ({
     return null;
   }
 
-  // Debug logging
-  console.log('FloorPlanOverlay received bounds:', bounds);
-  console.log('Coordinate comparison:', {
-    southWest: { lat: bounds.southWest.latitude, lng: bounds.southWest.longitude },
-    northEast: { lat: bounds.northEast.latitude, lng: bounds.northEast.longitude },
-    latDiff: bounds.northEast.latitude - bounds.southWest.latitude,
-    lngDiff: bounds.northEast.longitude - bounds.southWest.longitude
-  });
+  // Debug logging removed
 
   // Validate coordinates
   const { southWest, northEast } = bounds;
@@ -78,22 +71,7 @@ const FloorPlanOverlay: React.FC<FloorPlanOverlayProps> = ({
     { latitude: boundsBuilder.maxLat, longitude: boundsBuilder.maxLng }
   ];
   
-  console.log('Overlay bounds for react-native-maps:', overlayBounds);
-  console.log('Bounds as LatLng objects:', boundsAsLatLng);
-  console.log('Bounds builder result:', {
-    original: { southWest, northEast },
-    builder: boundsBuilder,
-    southwest: overlayBounds[0],
-    northeast: overlayBounds[1],
-    latValid: overlayBounds[0][0] < overlayBounds[1][0],
-    lngValid: overlayBounds[0][1] < overlayBounds[1][1],
-    latLngFormat: {
-      southwest: boundsAsLatLng[0],
-      northeast: boundsAsLatLng[1],
-      latValid: boundsAsLatLng[0].latitude < boundsAsLatLng[1].latitude,
-      lngValid: boundsAsLatLng[0].longitude < boundsAsLatLng[1].longitude
-    }
-  });
+  // Bounds builder logging removed
 
   // Calculate center point for the floorplan
   const centerLat = (boundsBuilder.minLat + boundsBuilder.maxLat) / 2;
@@ -102,11 +80,6 @@ const FloorPlanOverlay: React.FC<FloorPlanOverlayProps> = ({
   // Calculate the dimensions of the floorplan area
   const latDelta = boundsBuilder.maxLat - boundsBuilder.minLat;
   const lngDelta = boundsBuilder.maxLng - boundsBuilder.minLng;
-  
-  console.log('Floorplan center and dimensions:', {
-    center: { lat: centerLat, lng: centerLng },
-    dimensions: { latDelta, lngDelta }
-  });
 
   // Use a Marker with a custom image that represents the floorplan
   // This avoids the Overlay bounds issue entirely
