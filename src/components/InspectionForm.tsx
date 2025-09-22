@@ -27,6 +27,9 @@ export interface InspectionData {
   skipReason?: string;
   photos: string[];
   timestamp: string;
+  walkingTimeSeconds?: number;
+  walkingTimeFormatted?: string;
+  completedAt?: string;
 }
 
 const InspectionForm: React.FC<InspectionFormProps> = ({

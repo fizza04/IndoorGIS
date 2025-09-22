@@ -74,9 +74,14 @@ export function useHogentPDR(): UseHogentPDRReturn {
   }, [isTracking]);
 
   const stopTracking = useCallback(() => {
+    console.log('🛑 Hook stopTracking called, isTracking:', isTracking);
     if (pdrServiceRef.current && isTracking) {
+      console.log('🛑 Calling service stopTracking');
       pdrServiceRef.current.stopTracking();
+      console.log('🛑 Setting isTracking to false');
       setIsTracking(false);
+    } else {
+      console.log('🛑 Not stopping - service:', !!pdrServiceRef.current, 'isTracking:', isTracking);
     }
   }, [isTracking]);
 

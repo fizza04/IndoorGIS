@@ -11,6 +11,7 @@ import {
   Platform,
   Animated,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import MapView, {
   Marker,
   PROVIDER_DEFAULT,
@@ -28,6 +29,13 @@ import QRScanner from '../components/QRScanner';
 import InspectionForm, { InspectionData } from '../components/InspectionForm';
 import { useHogentPDR } from '../hooks/useHogentPDR';
 import { useFloorPlan } from '../hooks/useFloorPlan';
+import { useWalkingTime } from '../hooks/useWalkingTime';
+import { AuditService } from '../services/auditService';
+import { CoordinateService } from '../services/coordinateService';
+import { formatWalkingTime, getCurrentStepText, getSessionStatusText } from '../utils/helpers';
+import InstructionsPanel from '../components/InstructionsPanel';
+import FloatingActionButtons from '../components/FloatingActionButtons';
+import SessionStatus from '../components/SessionStatus';
 import { HogentPDRPosition } from '../services/pdr/HogentPDRService';
 import { AndroidPermissions } from '../utils/AndroidPermissions';
 import FloorPlanOverlay from '../components/FloorPlanOverlay';
@@ -49,8 +57,8 @@ interface MapScreenProps {
 const DEFAULT_COORDINATES = {
   latitude: 0, // No default location - will be set by first building
   longitude: 0,
-  latitudeDelta: 0.01,
-  longitudeDelta: 0.01,
+  latitudeDelta: 0.01, // Better default zoom to show building context
+  longitudeDelta: 0.01, // Better default zoom to show building context
 };
 
 const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
@@ -87,7 +95,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   const [isNavigating, setIsNavigating] = useState(false);
   const [completedPOIs, setCompletedPOIs] = useState<Set<number>>(new Set());
 
-  // Audit session state - fetched from backend
+  // Audit session state - fully dynamic from server
   const [auditSession, setAuditSession] = useState<{
     session_id: string;
     route_id: string;
@@ -99,6 +107,16 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     total_pois: number;
     last_updated: string;
   } | null>(null);
+  
+  // Current POI to scan - fetched from server
+  const [currentPOIToScan, setCurrentPOIToScan] = useState<POI | null>(null);
+  const [sessionProgress, setSessionProgress] = useState<{
+    completed: number;
+    total: number;
+    remaining: number;
+  } | null>(null);
+  const [isSessionComplete, setIsSessionComplete] = useState(false);
+  
   const [showInspectionForm, setShowInspectionForm] = useState(false);
   const [currentInspectionPOI, setCurrentInspectionPOI] = useState<POI | null>(
     null,
@@ -107,6 +125,23 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   const [pdrAnimatedRegion, setPdrAnimatedRegion] =
     useState<AnimatedRegion | null>(null);
   const [isPdrPointerInitialized, setIsPdrPointerInitialized] = useState(false);
+  const [isNavigatingToRoute, setIsNavigatingToRoute] = useState(false);
+  const [isSessionHeaderCollapsed, setIsSessionHeaderCollapsed] = useState(true);
+  
+  // Walking time tracking using custom hook
+  const {
+    walkingStartTime,
+    lastPOICompletionTime,
+    currentWalkingTime,
+    isWalking,
+    resetWalkingTime,
+    updateWalkingTimeForPOI,
+  } = useWalkingTime(isPDRTracking, pdrPosition, auditSession);
+  
+  const [showInstructions, setShowInstructions] = useState(false);
+  const [isMapReady, setIsMapReady] = useState(false);
+  const [lastCalibratedPOI, setLastCalibratedPOI] = useState<POI | null>(null);
+
 
   // Hogent PDR - EXACT implementation
   const {
@@ -123,12 +158,30 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     toLocal,
   } = useHogentPDR();
 
-  // PDR Position Update Handler
+
+  // PDR Position Update Handler with throttling for realistic movement
+  const lastPDRUpdate = useRef<number>(0);
+  const PDR_UPDATE_INTERVAL = 10000; // Update every 10 seconds for very slow, realistic indoor movement
+
   const handlePDRPositionUpdate = useCallback(
     (position: HogentPDRPosition) => {
-      // Update animated region for smooth movement
-      if (pdrAnimatedRegion && isPdrPointerInitialized) {
-        const pdrCoords = toLatLng(position.x, position.y);
+      const now = Date.now();
+      
+      // Throttle updates to make movement more realistic
+      if (now - lastPDRUpdate.current < PDR_UPDATE_INTERVAL) {
+        return;
+      }
+      
+      lastPDRUpdate.current = now;
+      
+      // Update animated region for smooth movement with realistic scaling
+      if (pdrAnimatedRegion && isPdrPointerInitialized && pdrStartPosition) {
+        // Use very small scaling factor for realistic indoor movement
+        const SCALE_FACTOR = 0.0000005; // Even smaller for more realistic indoor movement
+        const pdrCoords = {
+          latitude: pdrStartPosition.latitude + (position.x * SCALE_FACTOR),
+          longitude: pdrStartPosition.longitude + (position.y * SCALE_FACTOR)
+        };
 
         if (pdrCoords.latitude !== 0 && pdrCoords.longitude !== 0) {
           pdrAnimatedRegion.setValue({
@@ -140,7 +193,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         }
       }
     },
-    [pdrAnimatedRegion, isPdrPointerInitialized, toLatLng],
+    [pdrAnimatedRegion, isPdrPointerInitialized, pdrStartPosition],
   );
 
   // Services
@@ -156,7 +209,19 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     return () => {
       // Cleanup is handled by the hook
     };
-  }, [route?.params]);
+  }, []);
+
+  // Restore state when component mounts (for navigation back)
+  useEffect(() => {
+    const restoreState = async () => {
+      // If we have a selected route but no POIs, reload them
+      if (selectedRoute && pois.length === 0) {
+        await loadRoutePOIs(selectedRoute);
+      }
+    };
+
+    restoreState();
+  }, [selectedRoute]);
 
 
 
@@ -181,10 +246,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         // Initialize Hogent PDR system
         initializePDRBuilding(selectedBuilding, pois);
         
-        // Auto-start PDR tracking
-        if (!isPDRTracking) {
-          startPDRTracking();
-        }
+        // PDR is now manual only - user must click Start PDR button
       } catch (error) {
         // Show user-friendly error message
         Alert.alert(
@@ -196,22 +258,100 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     }
   }, [selectedBuilding, pois, initializePDRBuilding, startPDRTracking, isPDRTracking]);
 
+
   // Navigate to building when selected
   useEffect(() => {
     if (selectedBuilding && mapRef.current) {
-      const lat = parseFloat(selectedBuilding.coordinates_lat || '0');
-      const lng = parseFloat(selectedBuilding.coordinates_lng || '0');
+      const lat = parseFloat(selectedBuilding.coordinates?.latitude?.toString() || '0');
+      const lng = parseFloat(selectedBuilding.coordinates?.longitude?.toString() || '0');
       
       if (lat !== 0 && lng !== 0) {
         mapRef.current.animateToRegion({
           latitude: lat,
           longitude: lng,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
+          latitudeDelta: 0.005, // Better zoom for building context
+          longitudeDelta: 0.005, // Better zoom for building context
         }, 1000);
       }
     }
   }, [selectedBuilding]);
+
+  // Navigate to route POIs when they change
+  useEffect(() => {
+    if (selectedRoute && pois && pois.length > 0 && mapRef.current && !isNavigatingToRoute) {
+      const validCoordinates = [];
+      for (const poi of pois) {
+        const coordinates = CoordinateService.getTransformedPOICoordinates(poi);
+        if (coordinates) {
+          validCoordinates.push(coordinates);
+        }
+      }
+      
+      if (validCoordinates.length > 0) {
+        const { center, zoomLevel } = CoordinateService.calculateOptimalView(validCoordinates);
+        const region = {
+          latitude: center.latitude,
+          longitude: center.longitude,
+          latitudeDelta: zoomLevel,
+          longitudeDelta: zoomLevel,
+        };
+        setRegion(region);
+        if (mapRef.current && isMapReady) {
+          try {
+            mapRef.current.animateToRegion(region, 1000);
+          } catch (error) {
+            // Silent error handling
+          }
+        }
+      }
+    }
+  }, [pois, selectedRoute]);
+
+  // Restore state when screen comes back into focus (for navigation back)
+  useFocusEffect(
+    useCallback(() => {
+      const restoreState = async () => {
+        // If we have a selected route but no POIs, reload them
+        if (selectedRoute && pois.length === 0) {
+          await loadRoutePOIs(selectedRoute);
+        }
+
+        // Restore map view if we have POIs
+        if (selectedRoute && pois.length > 0 && mapRef.current) {
+          setTimeout(() => {
+            const validCoordinates = [];
+            for (const poi of pois) {
+              const coordinates = CoordinateService.getTransformedPOICoordinates(poi);
+              if (coordinates) {
+                validCoordinates.push(coordinates);
+              }
+            }
+            
+            if (validCoordinates.length > 0) {
+              const { center, zoomLevel } = CoordinateService.calculateOptimalView(validCoordinates);
+              const region = {
+                latitude: center.latitude,
+                longitude: center.longitude,
+                latitudeDelta: zoomLevel,
+                longitudeDelta: zoomLevel,
+              };
+              setRegion(region);
+              if (mapRef.current && isMapReady) {
+                try {
+                  mapRef.current.animateToRegion(region, 1000);
+                } catch (error) {
+                  // Silent error handling
+                }
+              }
+            }
+          }, 500);
+        }
+      };
+
+      restoreState();
+    }, [selectedRoute, pois])
+  );
+
 
   // Auto-load floorplan when POIs are loaded (for audit routes)
   useEffect(() => {
@@ -233,7 +373,26 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     }
   }, [pois, selectedBuilding, loadFloorPlan]);
 
-  // Current location pin stays FIXED at POI coordinates - no useEffect needed
+  // Initialize PDR animated region when PDR starts
+  useEffect(() => {
+    if (isPDRTracking && pdrStartPosition && !pdrAnimatedRegion) {
+      const animatedRegion = new AnimatedRegion({
+        latitude: pdrStartPosition.latitude,
+        longitude: pdrStartPosition.longitude,
+        latitudeDelta: 0.001,
+        longitudeDelta: 0.001,
+      });
+      setPdrAnimatedRegion(animatedRegion);
+      setIsPdrPointerInitialized(true);
+    }
+  }, [isPDRTracking, pdrStartPosition, pdrAnimatedRegion]);
+
+  // Update PDR position when PDR data changes
+  useEffect(() => {
+    if (pdrPosition && isPDRTracking && pdrStartPosition) {
+      handlePDRPositionUpdate(pdrPosition);
+    }
+  }, [pdrPosition, isPDRTracking, pdrStartPosition, handlePDRPositionUpdate]);
 
   const checkAndroidPermissions = async () => {
     if (Platform.OS === 'android') {
@@ -312,13 +471,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         if (route.params?.selectedRoute) {
           await loadRoutePOIs(route.params.selectedRoute);
         }
-
-        // Wait for POI data to be loaded, then navigate
-      setTimeout(() => {
-          if (route.params?.selectedRoute) {
-            navigateToRouteLocation(route.params.selectedRoute);
-          }
-      }, 500);
     }
     } catch (err) {
       setError(
@@ -333,7 +485,8 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
   const loadRoutePOIs = async (route: AuditRoute) => {
     try {
-      setSelectedRoute(route);
+      // Clear POIs first to ensure fresh state
+      setPois([]);
       
       // Step 1: Set the building for the route (following anyplace-architect pattern)
       const buildingId = route.building_id || route.bu_code || route.building_code;
@@ -349,10 +502,10 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           const mockBuilding = {
             id: buildingId,
             bu_code: buildingId,
-            name: route.building_name || 'Route Building',
-            coordinates: route.building_lat && route.building_lng ? {
-              latitude: parseFloat(route.building_lat),
-              longitude: parseFloat(route.building_lng)
+            name: route.buildingName || 'Route Building',
+            coordinates: (route as any).building_lat && (route as any).building_lng ? {
+              latitude: parseFloat((route as any).building_lat),
+              longitude: parseFloat((route as any).building_lng)
             } : undefined,
           };
           setSelectedBuilding(mockBuilding);
@@ -360,13 +513,13 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       }
       
       if (route.pois && route.pois.length > 0) {
-
         // Check if POIs have coordinates
         const hasCoordinates = route.pois.some(
           poi => poi.coordinates || poi.latitude || poi.coordinates_lat,
         );
 
         if (hasCoordinates) {
+          // Set POIs immediately
           setPois(route.pois);
           
           // Auto-load floorplan for first POI's floor
@@ -382,7 +535,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
               loadFloorPlan(buildingId, String(floorNumber)).catch(error => {
                 if (error.message.includes('Floorplan not available')) {
                 } else {
-                  // console.warn('Failed to load floorplan for route:', error.message);
                 }
               });
             }, 1500);
@@ -406,7 +558,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
               loadFloorPlan(buildingId, String(floorNumber)).catch(error => {
                 if (error.message.includes('Floorplan not available')) {
                 } else {
-                  // console.warn('Failed to load floorplan for route:', error.message);
                 }
               });
             }, 1500);
@@ -436,7 +587,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
                   loadFloorPlan(buildingId, String(floorNumber)).catch(error => {
                     if (error.message.includes('Floorplan not available')) {
                     } else {
-                      // console.warn('Failed to load floorplan for route floor:', error.message);
                     }
                   });
                 }, 1500);
@@ -445,7 +595,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
               setPois([]);
             }
           } catch (poiError) {
-            // console.error('Error fetching POIs:', poiError);
             setPois([]);
           }
         } else {
@@ -453,7 +602,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         }
       }
     } catch (error) {
-      // console.error('Error loading route POIs:', error);
     }
   };
 
@@ -461,110 +609,232 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   // Start audit session - fully dynamic
   const startAuditSession = async (routeId: string) => {
     try {
-      const response = await auditAPI.startAuditSession(routeId);
-
-      // Fetch the complete session data from backend
-      const sessionData = await auditAPI.getAuditSession(response.sessionId);
-
-      // Ensure we have the correct session data structure
-      const formattedSession = {
-        session_id: sessionData.session_id || response.sessionId,
-        route_id: sessionData.route_id || routeId,
-        auditor_id: sessionData.auditor_id || 'admin',
-        session_status: sessionData.session_status || 'active',
-        started_at: sessionData.started_at || new Date().toISOString(),
-        ended_at: sessionData.ended_at || '',
-        completed_pois: sessionData.completed_pois || [],
-        total_pois: sessionData.total_pois || 0,
-        last_updated: sessionData.last_updated || new Date().toISOString(),
-      };
-
-      setAuditSession(formattedSession);
-
-      return response.sessionId;
+      const { sessionId, sessionData } = await AuditService.startAuditSession(routeId);
+      setAuditSession(sessionData);
+      await fetchNextPOI(sessionId);
+      return sessionId;
     } catch (error: any) {
-      // console.error('Error starting audit session:', error);
-      // console.error('Error details:', error.response?.data || error.message);
-      Alert.alert(
-        'Error',
-        `Failed to start audit session: ${
-          error.response?.data?.message || error.message
-        }`,
-      );
+      Alert.alert('Error', `Failed to start audit session: ${error.message}`);
       return null;
+    }
+  };
+
+  // Fetch next POI to scan from server
+  const fetchNextPOI = async (sessionId: string) => {
+    try {
+      const response = await AuditService.fetchNextPOI(sessionId);
+      
+      if (response.is_complete) {
+        setIsSessionComplete(true);
+        setCurrentPOIToScan(null);
+        setSessionProgress(response.progress);
+        
+        // Auto-end session when all POIs are completed
+      Alert.alert(
+          'All POIs Completed!',
+          'Congratulations! You have successfully completed all POIs in this audit route. The session will now end automatically.',
+          [
+            {
+              text: 'End Session',
+              onPress: async () => {
+                // Stop PDR tracking
+                if (isPDRTracking) {
+                  stopPDRTracking();
+                }
+                // End the audit session
+                await endAuditSession();
+              }
+            }
+          ]
+        );
+      } else {
+        setCurrentPOIToScan(response.poi);
+        setSessionProgress(response.progress);
+        setIsSessionComplete(false);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', `Failed to fetch next POI: ${error.message}`);
     }
   };
 
   // End audit session - fully dynamic
   const endAuditSession = async () => {
-    if (!auditSession?.session_id) return;
+    if (!AuditService.validateSessionState(auditSession, 'session ending')) return;
 
     try {
-      await auditAPI.endAuditSession(auditSession.session_id);
+      // Check if any POIs were actually scanned (use server data)
+      if (auditSession.completed_pois.length === 0) {
+        Alert.alert(
+          'No POIs Scanned',
+          'You haven\'t scanned any POIs yet. Are you sure you want to end this session?',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { 
+              text: 'End Anyway', 
+              style: 'destructive',
+              onPress: () => confirmEndSession()
+            }
+          ]
+        );
+        return;
+      }
 
-      // Fetch updated session data from backend
-      const updatedSession = await auditAPI.getAuditSession(
-        auditSession.session_id,
-      );
-      setAuditSession(updatedSession);
+      await confirmEndSession();
+    } catch (error: any) {
+      Alert.alert('Error', `Failed to end audit session: ${error.message}`);
+    }
+  };
 
+  const confirmEndSession = async () => {
+    try {
+      await AuditService.endAuditSession(auditSession!.session_id);
+
+      // Clear all local state - don't fetch updated session data
+      setAuditSession(null);
         setIsNavigating(false);
         setCurrentPOIIndex(0);
         setCompletedPOIs(new Set());
         setPdrStartPosition(null);
+      setSelectedRoute(null);
+      setCurrentPOIToScan(null);
+      setSessionProgress(null);
+      setIsSessionComplete(false);
+      setNavigationState(null);
+      
+      
+      // Reset walking time tracking
+      resetWalkingTime();
+      
+      // Stop PDR if running
+      if (isPDRTracking) {
+        stopPDRTracking();
+      }
 
       Alert.alert(
-        'Session Complete',
-        'Audit session has been completed successfully!',
+        'Session Ended',
+        'Audit session has been ended. You can start a new session anytime.',
       );
     } catch (error: any) {
-      // console.error('Error ending audit session:', error);
-      Alert.alert(
-        'Error',
-        `Failed to end audit session: ${
-          error.response?.data?.message || error.message
-        }`,
-      );
+      Alert.alert('Error', `Failed to end audit session: ${error.message}`);
     }
   };
 
   // Submit POI inspection data - fully dynamic
   const submitPOIInspection = async (inspectionData: InspectionData) => {
-
-    if (!auditSession?.session_id) {
-      // console.error('No audit session found');
-      // console.error('Audit session state:', auditSession);
-      Alert.alert(
-        'Error',
-        'No active audit session found. Please select a route first.',
-      );
+    if (!AuditService.validateSessionState(auditSession, 'POI inspection submission')) {
+      Alert.alert('Error', 'No active audit session found. Please select a route first.');
       return false;
     }
 
     try {
+      // Calculate walking time for this POI
+      const walkingTimeForPOI = lastPOICompletionTime 
+        ? Math.floor((new Date().getTime() - lastPOICompletionTime.getTime()) / 1000)
+        : currentWalkingTime;
 
-      const response = await auditAPI.submitPOIAudit(
+      const success = await AuditService.submitPOIInspection(
         auditSession.session_id,
-        inspectionData.poiId,
         inspectionData,
+        walkingTimeForPOI,
+        formatWalkingTime
       );
 
-      // Fetch updated session data from backend instead of updating local state
-      const updatedSession = await auditAPI.getAuditSession(
-        auditSession.session_id,
-      );
+      if (success) {
+        // Update walking time tracking
+        updateWalkingTimeForPOI();
+        
+        // CALIBRATE USER POSITION TO SCANNED POI
+        // Use the current POI to scan (from server) instead of local index
+        const currentPOI = currentPOIToScan;
+        console.log('🔍 Current POI to scan:', currentPOI?.name, 'ID:', currentPOI?.puid || currentPOI?.id);
+        if (currentPOI && pdrStartPosition) {
+          const poiCoords = CoordinateService.getTransformedPOICoordinates(currentPOI);
+          if (poiCoords) {
+            console.log('🎯 Calibrating to POI:', currentPOI.name, 'at coordinates:', poiCoords);
+            
+            // Update PDR start position to the POI location
+            setPdrStartPosition(poiCoords);
+            
+            // Set this POI as the last calibrated POI
+            setLastCalibratedPOI(currentPOI);
+            
+            // Reset PDR position to origin (0,0) relative to the new POI
+            calibratePDRPosition(0, 0, pdrPosition?.heading || 0);
+            
+            // IMMEDIATELY move current location marker to POI coordinates
+            // This ensures the marker shows the user is now at the POI location
+            if (pdrAnimatedRegion) {
+              pdrAnimatedRegion.setValue({
+                latitude: poiCoords.latitude,
+                longitude: poiCoords.longitude,
+                latitudeDelta: 0.001,
+                longitudeDelta: 0.001,
+              });
+            }
+            
+            // Force update the PDR position handler to reflect the new position
+            // This ensures the marker moves to the POI location immediately
+            setTimeout(() => {
+              if (pdrPosition) {
+                // Trigger a position update with the calibrated position
+                handlePDRPositionUpdate({
+                  ...pdrPosition,
+                  x: 0,
+                  y: 0,
+                  timestamp: Date.now()
+                });
+              }
+            }, 100);
+            
+            // Also force update the animated region immediately to show the marker at POI location
+            if (pdrAnimatedRegion) {
+              pdrAnimatedRegion.setValue({
+                latitude: poiCoords.latitude,
+                longitude: poiCoords.longitude,
+                latitudeDelta: 0.001,
+                longitudeDelta: 0.001,
+              });
+            }
+            
+            // Also update the map region to center on the POI
+            if (mapRef.current && isMapReady) {
+              try {
+                mapRef.current.animateToRegion({
+                  latitude: poiCoords.latitude,
+                  longitude: poiCoords.longitude,
+                  latitudeDelta: 0.001,
+                  longitudeDelta: 0.001,
+                }, 1000);
+              } catch (error) {
+                console.warn('Error animating to POI location:', error);
+              }
+            }
+            
+            // Show visual feedback that position has been calibrated
+            Alert.alert(
+              'Position Calibrated',
+              `Your position has been calibrated to ${currentPOI.name}.\n\nYou are now at the POI location.`,
+              [{ text: 'OK' }]
+            );
+            
+            console.log('✅ Position calibrated to POI location');
+          }
+        }
+        
+        // Fetch updated session data from backend
+        const updatedSession = await AuditService.getAuditSession(auditSession.session_id);
       setAuditSession(updatedSession);
+        
+        // Fetch next POI to scan
+        await fetchNextPOI(auditSession.session_id);
 
       return true;
+      } else {
+        Alert.alert('Error', 'Failed to submit POI inspection data');
+        return false;
+      }
     } catch (error: any) {
-      // console.error('Error submitting POI inspection:', error);
-      // console.error('Error details:', error.response?.data || error.message);
-      Alert.alert(
-        'Error',
-        `Failed to submit inspection data: ${
-          error.response?.data?.message || error.message
-        }`,
-      );
+      Alert.alert('Error', `Failed to submit inspection data: ${error.message}`);
       return false;
     }
   };
@@ -593,7 +863,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           fullPOIs.push(fullPOI);
         }
       } catch (error) {
-        // console.error(`Error fetching POI ${routePOI.puid}:`, error);
         // Add the route POI as fallback
         fullPOIs.push(routePOI);
       }
@@ -624,34 +893,85 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
             loadFloorPlan(buildingId, firstFloor);
           }
         } catch (err) {
-          // console.error('Error loading POIs:', err);
           setPois([]);
         }
       }
 
-      if (mapRef.current && building.coordinates) {
+      if (mapRef.current && building.coordinates && isMapReady) {
+        try {
         mapRef.current.animateToRegion({
           latitude: building.coordinates.latitude,
           longitude: building.coordinates.longitude,
-          latitudeDelta: 0.005,
-          longitudeDelta: 0.005,
-        });
+            latitudeDelta: 0.001, // Closer zoom for building selection
+            longitudeDelta: 0.001, // Closer zoom for building selection
+          }, 1000);
+        } catch (error) {
+          // Silent error handling
+        }
       }
     } catch (err) {
-      // console.error('Error selecting building:', err);
       Alert.alert('Error', 'Failed to load building details');
     }
   };
 
   const handleRouteSelect = async (route: AuditRoute) => {
-    if (route.pois && route.pois.length > 0) {
-    }
+    try {
+      // CRITICAL: Reset all previous state before loading new route
+      
+      // Reset navigation flag
+      setIsNavigatingToRoute(false);
+      
+      // Stop any active PDR tracking
+      if (isPDRTracking) {
+        stopPDRTracking();
+      }
+      
+      // Reset PDR state completely
+      resetPDR();
+      setPdrStartPosition(null);
+      setPdrAnimatedRegion(null);
+      setIsPdrPointerInitialized(false);
+      
+      // Reset navigation state
+      setIsNavigating(false);
+      setCurrentPOIIndex(0);
+      setCompletedPOIs(new Set());
+      setNavigationState(null);
+      
+      // Reset building and floor state
+      setSelectedBuilding(null);
+      setSelectedFloor('');
+      clearFloorPlan();
+      
+      // Reset audit session
+      setAuditSession(null);
+      setShowInspectionForm(false);
+      setCurrentInspectionPOI(null);
+      
+      // Set the new route
     setSelectedRoute(route);
 
-    // Load POI data first
+      // Load POI data for the new route
     await loadRoutePOIs(route);
 
-     // Initialize PDR building data
+      // Wait a bit for POIs to be set, then navigate to route location
+      setTimeout(() => {
+        // Double-check that POIs are loaded before navigating
+        if (route.pois && route.pois.length > 0) {
+          navigateToRouteLocation(route);
+        } else {
+          // Retry loading POIs
+          setTimeout(() => {
+            loadRoutePOIs(route).then(() => {
+              navigateToRouteLocation(route);
+            });
+          }, 200);
+        }
+      }, 300);
+
+      // Wait for POI data to be loaded, then initialize PDR
+      setTimeout(async () => {
+        
      if (selectedBuilding && pois && pois.length > 0) {
        // Ensure building has coordinates for coordinate transformation
        const buildingWithCoords = {
@@ -662,7 +982,11 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
          },
        };
 
-       initializePDRBuilding(buildingWithCoords, pois);
+          try {
+            await initializePDRBuilding(buildingWithCoords, pois);
+          } catch (error) {
+            // Silent error handling
+          }
      }
 
     // Load floor plan for the building
@@ -680,6 +1004,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       Alert.alert('Error', 'Route ID not found');
       return;
     }
+        
     const sessionId = await startAuditSession(routeId);
     if (sessionId) {
       Alert.alert(
@@ -689,79 +1014,52 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       );
     }
 
-    // Wait a bit for POI data to be processed
-    setTimeout(() => {
+        // Navigate to the new route location
       navigateToRouteLocation(route);
-    }, 500);
+      }, 1000); // Increased delay to ensure all state is reset
+      
+    } catch (error) {
+      Alert.alert('Error', 'Failed to load route. Please try again.');
+    }
   };
 
   const navigateToRouteLocation = (route: AuditRoute) => {
-    // Check if we have POIs with coordinates
-    if (pois && pois.length > 0) {
-      const firstPOI = pois[0];
-      const coordinates = getTransformedPOICoordinates(firstPOI);
-
-      if (coordinates && mapRef.current) {
-        mapRef.current.animateToRegion({
-          latitude: coordinates.latitude,
-          longitude: coordinates.longitude,
-          latitudeDelta: 0.005,
-          longitudeDelta: 0.005,
-        });
-
-        // Show message to scan first POI
-        Alert.alert(
-          'Route Selected',
-          `Navigate to the first POI: ${
-            firstPOI.name || 'Unknown POI'
-          }\n\nCoordinates: ${coordinates.latitude.toFixed(
-            6,
-          )}, ${coordinates.longitude.toFixed(
-            6,
-          )}\n\nScan the QR code at this location to start PDR tracking.`,
-          [
-            { text: 'OK', style: 'default' },
-            { text: 'Scan QR Now', onPress: () => handleQRScan() },
-          ],
-        );
+    // Prevent multiple navigation calls
+    if (isNavigatingToRoute) {
         return;
-      }
     }
-
-    // Fallback to building if no POI coordinates
-    if (route.building_id) {
-      const building = buildings.find(
-        b => b.id === route.building_id || b.bu_code === route.building_id,
+    
+    setIsNavigatingToRoute(true);
+    
+    // Use route POIs if available, otherwise use loaded POIs
+    const poisToUse = route.pois && route.pois.length > 0 ? route.pois : pois;
+    
+    if (poisToUse && poisToUse.length > 0) {
+      const success = CoordinateService.navigateToRouteLocation(
+        route,
+        poisToUse,
+        mapRef,
+        setRegion,
+        setIsNavigatingToRoute
       );
-      if (building && building.coordinates && mapRef.current) {
-        mapRef.current.animateToRegion({
-          latitude: building.coordinates.latitude,
-          longitude: building.coordinates.longitude,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        });
-
+      
+      if (success) {
+        // Show message to scan first POI
+        setTimeout(() => {
       Alert.alert(
           'Route Selected',
-          `Navigate to building: ${
-            building.name
-          }\n\nCoordinates: ${building.coordinates.latitude.toFixed(
-            6,
-          )}, ${building.coordinates.longitude.toFixed(
-            6,
-          )}\n\nFind the first POI and scan its QR code to start PDR tracking.`,
+            `Navigate to the first POI and scan the QR code to start PDR tracking.`,
           [
             { text: 'OK', style: 'default' },
             { text: 'Scan QR Now', onPress: () => handleQRScan() },
           ],
         );
-        return;
+        }, 1200); // Wait for animation to complete
+      } else {
+        setIsNavigatingToRoute(false);
       }
-    }
-
-    // Last resort
-    if (mapRef.current) {
-      mapRef.current.animateToRegion(DEFAULT_COORDINATES);
+    } else {
+      setIsNavigatingToRoute(false);
     }
   };
 
@@ -783,7 +1081,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         );
       }
     } catch (error) {
-      // console.error('QR scan error:', error);
       Alert.alert('Error', 'Failed to process QR code');
     }
   };
@@ -791,46 +1088,25 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   const handleAnchorScanned = (anchor: QRAnchor) => {
     setShowQRScanner(false);
 
-
-    // Try to find matching POI by name or ID
-    const matchingPOI = findPOIByNameOrId(anchor.name, anchor.id);
-
-    if (matchingPOI) {
-
-      // Get POI coordinates
-      const poiCoords = getTransformedPOICoordinates(matchingPOI);
-      if (poiCoords) {
-        // Find the index of this POI in the route
-        const poiIndex = pois.findIndex(
-          poi =>
-            poi.puid === matchingPOI.puid ||
-            poi.id === matchingPOI.puid ||
-            poi.puid === matchingPOI.id ||
-            poi.id === matchingPOI.id,
-        );
-
-        if (poiIndex === -1) {
+    // Check if there's an active session and current POI to scan
+    if (!auditSession || !currentPOIToScan) {
           Alert.alert(
-            'POI Not Found',
-            'This POI is not part of the current audit route.',
+        'No Active Session',
+        'Please start an audit session first before scanning POIs.',
           );
           return;
         }
 
-
-        // Check if this is the correct POI in sequence
-        if (poiIndex !== currentPOIIndex) {
-          const expectedPOI = pois[currentPOIIndex];
-    Alert.alert(
-            'Wrong POI Order',
-            `Please scan POI ${currentPOIIndex + 1} first: ${
-              expectedPOI?.name || 'Unknown'
-            }\n\nYou scanned: ${matchingPOI.name} (POI ${poiIndex + 1})`,
-      [{ text: 'OK' }],
-    );
-          return;
-        }
-
+    // Check if the scanned POI matches the current POI to scan
+    const scannedPOIId = anchor.id;
+    const expectedPOIId = currentPOIToScan.puid || currentPOIToScan.id;
+    
+    
+    if (scannedPOIId === expectedPOIId) {
+      
+      // Get POI coordinates for PDR calibration
+      const poiCoords = getTransformedPOICoordinates(currentPOIToScan);
+      if (poiCoords) {
         // Convert lat/lng to local coordinates for PDR
         const localCoords = toLocal(poiCoords.latitude, poiCoords.longitude);
 
@@ -839,42 +1115,24 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
         // Set PDR starting position for indoor positioning
         setPdrStartPosition(poiCoords);
-
-
-        // If we have a selected route, start navigation to next POI
-        if (selectedRoute && pois && pois.length > 0) {
-          startNavigationToNextPOI();
         }
 
         // Show inspection form for POI scanning
-        setCurrentInspectionPOI(matchingPOI);
+      setCurrentInspectionPOI(currentPOIToScan);
         setShowInspectionForm(true);
       } else {
-        Alert.alert('Invalid POI', 'POI does not have valid coordinates');
-      }
-    } else if (
-      anchor.position &&
-      anchor.position.x !== 0 &&
-      anchor.position.y !== 0
-    ) {
-      // Fallback to anchor position if available
-      const { x, y } = anchor.position;
-      calibratePDRPosition(x, y, anchor.heading);
-
-
     Alert.alert(
-      'Position Calibrated',
-        `Position updated using anchor: ${anchor.name}\nCoordinates: (${x}, ${y})`,
-      [{ text: 'OK' }],
-    );
-    } else {
-      Alert.alert(
-        'Invalid QR Code',
-        'Could not find matching POI or valid position data',
+        'Wrong POI',
+        `Please scan the correct POI: ${currentPOIToScan.name}\n\nScanned: ${anchor.name}`,
+        [
+          { text: 'OK', style: 'default' },
+          { 
+            text: 'Scan Again', 
+            onPress: () => setShowQRScanner(true)
+          }
+        ]
       );
     }
-
-    // Update navigation if active
     if (navigationState?.isActive) {
       navService.current.calibratePosition(anchor);
     }
@@ -887,16 +1145,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     setIsNavigating(true);
     setCurrentPOIIndex(0); // Start with first POI
 
-     // Start PDR tracking
-     if (!isPDRTracking) {
-       // Initialize building data for coordinate transformation
-       if (selectedBuilding && pois && pois.length > 0) {
-         initializePDRBuilding(selectedBuilding, pois);
-       }
-       startPDRTracking();
-       
-       // Hogent PDR is already started above
-     }
+       // PDR tracking is now manual only
   };
 
   const getNextPOI = () => {
@@ -909,24 +1158,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     return pois[currentPOIIndex];
   };
 
-  const moveToNextPOI = () => {
-
-    if (currentPOIIndex < pois.length - 1) {
-      // Mark current POI as completed
-      setCompletedPOIs(prev => new Set([...prev, currentPOIIndex]));
-
-      // Move to next POI
-      const newIndex = currentPOIIndex + 1;
-      setCurrentPOIIndex(newIndex);
-    } else {
-      // Mark last POI as completed
-      setCompletedPOIs(prev => new Set([...prev, currentPOIIndex]));
-
-      // All POIs completed
-      setIsNavigating(false);
-      Alert.alert('Route Complete', 'All POIs have been visited!');
-    }
-  };
 
   // Handle inspection form submission
   const handleInspectionSubmit = async (inspectionData: InspectionData) => {
@@ -959,17 +1190,8 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         );
         setCompletedPOIs(completedPOISet);
 
-        // Move to next POI if this was the current one
-        if (poiIndex === currentPOIIndex) {
-          moveToNextPOI();
+        // POI progression is now handled automatically by the server
         } else {
-          // Force update to next POI if there's a mismatch
-          if (poiIndex < currentPOIIndex) {
-            moveToNextPOI();
-          }
-        }
-      } else {
-        // console.error('POI not found in route for ID:', inspectionData.poiId);
       }
 
       // Show success message
@@ -1069,35 +1291,84 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   };
 
   const getNavigationPathCoordinates = () => {
-    if (!isNavigating) return [];
+    if (!auditSession) {
+      console.log('❌ No audit session for navigation path');
+      return [];
+    }
 
-    const currentPOI = getCurrentPOI();
-    const nextPOI = getNextPOI();
+    // Use server-driven POI progression instead of local index
+    const currentPOI = currentPOIToScan;
+    if (!currentPOI) {
+      console.log('❌ No current POI to scan for navigation path');
+      return [];
+    }
 
-    if (!currentPOI || !nextPOI) return [];
+    console.log('🔍 Navigation path - Current POI:', currentPOI.name, 'ID:', currentPOI.puid || currentPOI.id);
+
+    // Find the next POI in the route sequence
+    const currentPOIIndex = pois.findIndex(poi => 
+      poi.puid === currentPOI.puid || poi.id === currentPOI.id
+    );
+    
+    console.log('🔍 Navigation path - Current POI index:', currentPOIIndex, 'Total POIs:', pois.length);
+    
+    if (currentPOIIndex === -1 || currentPOIIndex >= pois.length - 1) {
+      console.log('❌ No next POI available for navigation path');
+      return [];
+    }
+
+    const nextPOI = pois[currentPOIIndex + 1];
+    if (!nextPOI) {
+      console.log('❌ Next POI not found');
+      return [];
+    }
+
+    console.log('🔍 Navigation path - Next POI:', nextPOI.name, 'ID:', nextPOI.puid || nextPOI.id);
 
     const currentCoords = getTransformedPOICoordinates(currentPOI);
     const nextCoords = getTransformedPOICoordinates(nextPOI);
 
-    if (!currentCoords || !nextCoords) return [];
+    if (!currentCoords || !nextCoords) {
+      console.log('❌ Invalid coordinates for navigation path');
+      return [];
+    }
 
-    // Create path from current POI to next POI (not from PDR position)
+    console.log('✅ Navigation path coordinates:', {
+      current: currentCoords,
+      next: nextCoords
+    });
+
+    // Create path from current POI to next POI
     return [currentCoords, nextCoords];
   };
 
   // Get dynamic path progress - shows how far user has traveled along the path
   const getDynamicPathProgress = () => {
-    if (!isNavigating || !pdrPosition) return [];
+    if (!auditSession) return [];
 
-    const currentPOI = getCurrentPOI();
-    const nextPOI = getNextPOI();
+    // Use server-driven POI progression instead of local index
+    const currentPOI = currentPOIToScan;
+    if (!currentPOI) return [];
 
-    if (!currentPOI || !nextPOI) return [];
+    // Find the next POI in the route sequence
+    const currentPOIIndex = pois.findIndex(poi => 
+      poi.puid === currentPOI.puid || poi.id === currentPOI.id
+    );
+    
+    if (currentPOIIndex === -1 || currentPOIIndex >= pois.length - 1) return [];
+
+    const nextPOI = pois[currentPOIIndex + 1];
+    if (!nextPOI) return [];
 
     const currentCoords = getTransformedPOICoordinates(currentPOI);
     const nextCoords = getTransformedPOICoordinates(nextPOI);
 
     if (!currentCoords || !nextCoords) return [];
+
+    // If PDR is not active, just show the full path
+    if (!pdrPosition) {
+      return [currentCoords, nextCoords];
+    }
 
     const pdrLatLng = toLatLng(pdrPosition.x, pdrPosition.y);
 
@@ -1174,6 +1445,46 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
     return completePath;
   };
 
+  // Get recent walking path (last 10 points) for smooth Google Maps-like navigation
+  const getRecentWalkingPath = () => {
+    if (!pdrStartPosition || !pathHistory || pathHistory.length === 0) {
+      return [];
+    }
+    
+    // Take only the last 15 points to avoid long trails
+    const recentPoints = pathHistory.slice(-15);
+    
+    // Much smaller scaling factor for realistic indoor movement
+    const SCALE_FACTOR = 0.0000005; // Even smaller for more realistic indoor movement
+    const MIN_DISTANCE = 0.5; // Minimum distance in meters to add a point
+    
+    const smoothedPath = [];
+    let lastValidPoint = null;
+    
+    for (let i = 0; i < recentPoints.length; i++) {
+      const point = recentPoints[i];
+      const lat = pdrStartPosition.latitude + (point.x * SCALE_FACTOR);
+      const lng = pdrStartPosition.longitude + (point.y * SCALE_FACTOR);
+      
+      // Check if this point is far enough from the last valid point
+      if (lastValidPoint) {
+        const distance = Math.sqrt(
+          Math.pow(point.x - lastValidPoint.x, 2) + 
+          Math.pow(point.y - lastValidPoint.y, 2)
+        );
+        
+        if (distance < MIN_DISTANCE) {
+          continue; // Skip this point if too close
+        }
+      }
+      
+      smoothedPath.push({ latitude: lat, longitude: lng });
+      lastValidPoint = point;
+    }
+    
+    return smoothedPath;
+  };
+
   // Get direction text from heading angle
   const getDirectionText = (heading: number) => {
     if (heading >= 337.5 || heading < 22.5) return 'North';
@@ -1188,60 +1499,182 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   };
 
   const getTransformedPOICoordinates = (poi: POI) => {
-    if (!poi) {
-      return null;
-    }
-
-    let poiLat = 0;
-    let poiLng = 0;
-
-    // Check for coordinates.lat and coordinates.lon first (most common format from audit routes)
-    if (poi.coordinates && typeof poi.coordinates === 'object') {
-      const coords = poi.coordinates as any;
-      if (coords.lat && coords.lon) {
-        poiLat = parseFloat(String(coords.lat));
-        poiLng = parseFloat(String(coords.lon));
-      } else if (coords.latitude && coords.longitude) {
-        poiLat = parseFloat(String(coords.latitude));
-        poiLng = parseFloat(String(coords.longitude));
-      } else if (Array.isArray(coords) && coords.length >= 2) {
-        // Handle array format [lat, lng]
-        poiLat = parseFloat(String(coords[0]));
-        poiLng = parseFloat(String(coords[1]));
-      }
-    } else if (poi.coordinates_lat && poi.coordinates_lon) {
-      poiLat = parseFloat(String(poi.coordinates_lat));
-      poiLng = parseFloat(String(poi.coordinates_lon));
-    } else if (poi.latitude && poi.longitude) {
-      poiLat = poi.latitude;
-      poiLng = poi.longitude;
-    } else {
-    }
-
-    if (isNaN(poiLat) || isNaN(poiLng) || poiLat === 0 || poiLng === 0) {
-      return null;
-    }
-
-    return { latitude: poiLat, longitude: poiLng };
+    return CoordinateService.getTransformedPOICoordinates(poi);
   };
 
-  const startNavigation = () => {
+  const startNavigation = async () => {
+    
     if (!selectedRoute?.pois) {
       Alert.alert('Error', 'No route selected');
       return;
     }
 
+    // Check if there's already an active session
+    if (auditSession?.session_status === 'active') {
+      Alert.alert(
+        'Session Already Active',
+        'There is already an active audit session. Please end the current session before starting a new one.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { 
+            text: 'End Current & Start New', 
+            style: 'destructive',
+            onPress: () => {
+              endAuditSession().then(() => {
+                // Start new session after ending current one
+                setTimeout(() => startNavigation(), 1000);
+              });
+            }
+          }
+        ]
+      );
+      return;
+    }
+
     try {
+      
+      // 1. Start audit session with server
+      const sessionId = await startAuditSession(selectedRoute.id);
+      if (!sessionId) {
+        Alert.alert('Error', 'Failed to start audit session');
+        return;
+      }
+
+
+      // 2. Initialize PDR tracking if not already active
+      if (!isPDRTracking && selectedBuilding && pois && pois.length > 0) {
+        initializePDRBuilding(selectedBuilding, pois);
+        // Don't auto-start PDR - user must click Start PDR button
+      }
+
+      // 3. Start local navigation service
       navService.current.startRoute(selectedRoute, selectedRoute.pois);
+      
+      // 4. Navigate to route location on map
+      navigateToRouteLocation(selectedRoute);
+      
+      // 5. Update UI state
+      setIsNavigating(true);
+      setCurrentPOIIndex(0);
+      setNavigationState({ isActive: true });
+      
+      
+      // Show instructions for first-time users
+      setShowInstructions(true);
+      
+      Alert.alert(
+        'Route Started', 
+        `Audit session started for: ${selectedRoute.name}\n\nFollow the instructions to complete the audit.`
+      );
+      
     } catch (error) {
-      // console.error('Failed to start navigation:', error);
-      Alert.alert('Error', 'Failed to start navigation');
+      Alert.alert('Error', `Failed to start navigation: ${error.message}`);
     }
   };
 
-  const stopNavigation = () => {
-    navService.current.stopRoute();
+  const stopNavigation = async () => {
+    try {
+      // Check if any POIs were actually scanned (use server data)
+      if (auditSession?.completed_pois?.length === 0) {
+        Alert.alert(
+          'No POIs Scanned',
+          'You haven\'t scanned any POIs yet. Are you sure you want to end this session?',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { 
+              text: 'End Anyway', 
+              style: 'destructive',
+              onPress: () => confirmStopNavigation()
+            }
+          ]
+        );
+      return;
+    }
+
+      await confirmStopNavigation();
+    } catch (error) {
+      Alert.alert('Error', `Failed to stop navigation: ${error.message}`);
+    }
   };
+
+  const confirmStopNavigation = async () => {
+    try {
+      // 1. Stop local navigation service
+    navService.current.stopRoute();
+      
+      // 2. Stop PDR tracking
+      if (isPDRTracking) {
+        stopPDRTracking();
+      }
+      
+      // 3. End audit session if active
+      if (auditSession?.session_status === 'active') {
+        await AuditService.endAuditSession(auditSession.session_id);
+      }
+      
+      // 4. Clear all local state
+      setAuditSession(null);
+      setIsNavigating(false);
+      setCurrentPOIIndex(0);
+      setCompletedPOIs(new Set());
+      setPdrStartPosition(null);
+      setSelectedRoute(null);
+      setCurrentPOIToScan(null);
+      setSessionProgress(null);
+      setIsSessionComplete(false);
+      setNavigationState(null);
+      
+      // 5. Reset walking time tracking
+      resetWalkingTime();
+      
+      // 6. Stop PDR if running
+      if (isPDRTracking) {
+        stopPDRTracking();
+      }
+    } catch (error: any) {
+      Alert.alert('Error', `Failed to end audit session: ${error.message}`);
+    }
+  };
+
+  // Force map to show POI locations when POIs are loaded
+  useEffect(() => {
+    if (pois.length > 0 && !isNavigating) {
+      const validCoordinates = [];
+      for (const poi of pois) {
+        const coordinates = CoordinateService.getTransformedPOICoordinates(poi);
+        if (coordinates) {
+          validCoordinates.push(coordinates);
+        }
+      }
+      
+      if (validCoordinates.length > 0) {
+        // Use hardcoded region based on the POI coordinates
+        const region = {
+          latitude: 31.5151, // Center of the POI coordinates
+          longitude: 74.2975,
+          latitudeDelta: 0.001, // Very close zoom
+          longitudeDelta: 0.001,
+        };
+        
+        setRegion(region);
+        
+        // Retry mechanism if map isn't ready
+        const tryAnimateToRegion = () => {
+          if (mapRef.current && isMapReady) {
+            try {
+              mapRef.current.animateToRegion(region, 1000);
+            } catch (error) {
+              // Silent error handling
+            }
+          } else {
+            setTimeout(tryAnimateToRegion, 500);
+          }
+        };
+        
+        tryAnimateToRegion();
+      }
+    }
+  }, [pois, isNavigating, isMapReady]);
 
   if (loading) {
     return (
@@ -1252,6 +1685,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       </View>
     );
   }
+
 
   if (error && !buildings.length) {
     return (
@@ -1266,26 +1700,14 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#007AFF" />
-
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>
-          {selectedBuilding ? selectedBuilding.name : 'Select Building'}
-        </Text>
-        {selectedFloor && (
-          <Text style={styles.headerSubtitle}>
-            Floor {selectedFloor} • {pois.length} POIs
-          </Text>
-        )}
-      </View>
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
 
       {/* Floor Selector - Hidden for automatic mode */}
-      {false && selectedBuilding && selectedBuilding.floors && selectedBuilding.floors.length > 0 && (
+      {false && selectedBuilding && selectedBuilding?.floors && (selectedBuilding?.floors?.length ?? 0) > 0 && (
         <View style={styles.floorSelector}>
           <Text style={styles.floorSelectorLabel}>Select Floor:</Text>
           <View style={styles.floorButtons}>
-            {selectedBuilding.floors.map((floor) => (
+            {selectedBuilding?.floors?.map((floor) => (
               <TouchableOpacity
                 key={floor}
                 style={[
@@ -1308,253 +1730,68 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         </View>
       )}
 
-      {/* PDR Control Card */}
-      <View style={styles.pdrCard}>
-        <View style={styles.pdrCardHeader}>
-          <Text style={styles.pdrCardTitle}>
-            {auditSession?.session_status === 'active'
-              ? 'Audit Session Active'
-              : 'Indoor Navigation'}
-          </Text>
-          {auditSession?.session_status === 'active' && (
-            <Text style={styles.pdrCardSubtitle}>
-              Session: {auditSession.session_id.substring(0, 8)}... | Completed:{' '}
-              {auditSession.completed_pois.length}/{auditSession.total_pois}{' '}
-              POIs
-            </Text>
-          )}
-          {isPDRTracking && (
-            <View style={styles.pdrStatus}>
-              {/* Hogent-style live sensor data display */}
-              <Text style={styles.pdrStatusText}>
-                📍 Location: x:{pdrPosition?.x.toFixed(3)}, y:
-                {pdrPosition?.y.toFixed(3)}
-              </Text>
-              <Text style={styles.pdrStatusText}>
-                🧭 Heading:{' '}
-                {pdrPosition?.heading ? pdrPosition.heading.toFixed(2) : 0}°
-              </Text>
-              <Text style={styles.pdrStatusText}>
-                🚶 Steps: {stepCount} | Confidence:{' '}
-                {pdrPosition ? (pdrPosition.confidence * 100).toFixed(1) : 0}%
-              </Text>
-              {isNavigating &&
-                getCurrentPOI() &&
-                (() => {
-                  const nextPOI = getNextPOI();
-                  let directionStatus = '✓ On Track';
-                  let directionColor = '#00FF00';
+      {/* Session Status Component */}
+      <SessionStatus
+        auditSession={auditSession}
+        sessionProgress={sessionProgress}
+        currentPOIToScan={currentPOIToScan}
+        isPDRTracking={isPDRTracking}
+        isSessionComplete={isSessionComplete}
+        currentWalkingTime={currentWalkingTime}
+        isWalking={isWalking}
+        pdrPosition={pdrPosition}
+        stepCount={stepCount}
+        formatWalkingTime={formatWalkingTime}
+      />
 
-                  if (nextPOI && pdrPosition?.heading !== undefined) {
-                    const nextCoords = getTransformedPOICoordinates(nextPOI);
-                    if (nextCoords) {
-                      const pdrLatLng = toLatLng(pdrPosition.x, pdrPosition.y);
-                      const bearingToNext =
-                        (Math.atan2(
-                          nextCoords.longitude - pdrLatLng.longitude,
-                          nextCoords.latitude - pdrLatLng.latitude,
-                        ) *
-                          180) /
-                        Math.PI;
-                      const headingDiff = Math.abs(
-                        pdrPosition.heading - bearingToNext,
-                      );
-                      const normalizedDiff = Math.min(
-                        headingDiff,
-                        360 - headingDiff,
-                      );
+      {/* Instructions Panel */}
+      <InstructionsPanel
+        visible={showInstructions}
+        onClose={() => setShowInstructions(false)}
+      />
 
-                      if (normalizedDiff < 30) {
-                        directionStatus = '✓ On Track';
-                        directionColor = '#00FF00';
-                      } else if (normalizedDiff < 60) {
-                        directionStatus = '⚠ Check Direction';
-                        directionColor = '#FFA500';
+      {/* Floating Action Buttons Component */}
+      <FloatingActionButtons
+        onQRScan={handleQRScan}
+        onPDRToggle={() => {
+          if (isPDRTracking) {
+            stopPDRTracking();
                       } else {
-                        directionStatus = '❌ Wrong Direction';
-                        directionColor = '#FF0000';
-                      }
-                    }
-                  }
-
-                  // Calculate progress percentage
-                  const progressPath = getDynamicPathProgress();
-                  const fullPath = getNavigationPathCoordinates();
-                  let progressPercent = 0;
-
-                  if (progressPath.length > 1 && fullPath.length > 1) {
-                    const totalDistance = Math.sqrt(
-                      Math.pow(fullPath[1].latitude - fullPath[0].latitude, 2) +
-                        Math.pow(
-                          fullPath[1].longitude - fullPath[0].longitude,
-                          2,
-                        ),
-                    );
-                    const traveledDistance = Math.sqrt(
-                      Math.pow(
-                        progressPath[1].latitude - progressPath[0].latitude,
-                        2,
-                      ) +
-                        Math.pow(
-                          progressPath[1].longitude - progressPath[0].longitude,
-                          2,
-                        ),
-                    );
-                    progressPercent = Math.min(
-                      (traveledDistance / totalDistance) * 100,
-                      100,
-                    );
-            }
-
-            return (
-                    <>
-                      <Text style={styles.pdrStatusText}>
-                        📍 Current POI: {getCurrentPOI()?.name} (POI{' '}
-                        {currentPOIIndex + 1})
-                      </Text>
-                      <Text style={styles.pdrStatusText}>
-                        🎯 Next POI: {nextPOI?.name || 'Complete'} (POI{' '}
-                        {currentPOIIndex + 2})
-                      </Text>
-                      <Text
-                        style={[
-                          styles.pdrStatusText,
-                          { color: directionColor },
-                        ]}
-                      >
-                        🧭 {directionStatus} | Progress:{' '}
-                        {progressPercent.toFixed(1)}%
-                      </Text>
-                    </>
-                  );
-                })()}
-            </View>
-          )}
-        </View>
-
-        <View style={styles.pdrCardButtons}>
-          <TouchableOpacity style={styles.pdrCardButton} onPress={handleQRScan}>
-            <Text style={styles.pdrCardButtonIcon}>📷</Text>
-            <Text style={styles.pdrCardButtonText}>Scan QR</Text>
-              </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[
-              styles.pdrCardButton,
-              isPDRTracking
-                ? styles.pdrCardButtonStop
-                : styles.pdrCardButtonStart,
-            ]}
-            onPress={isPDRTracking ? stopPDRTracking : startPDRTracking}
-          >
-            <Text style={styles.pdrCardButtonIcon}>
-              {isPDRTracking ? '⏹️' : '🚶'}
-            </Text>
-            <Text style={styles.pdrCardButtonText}>
-              {isPDRTracking ? 'Stop' : 'Start'} PDR
-                    </Text>
-                  </TouchableOpacity>
-
-          {isNavigating && (
-                  <TouchableOpacity
-              style={[styles.pdrCardButton, styles.pdrCardButtonNext]}
-              onPress={moveToNextPOI}
-                  >
-              <Text style={styles.pdrCardButtonIcon}>➡️</Text>
-              <Text style={styles.pdrCardButtonText}>Next POI</Text>
-                  </TouchableOpacity>
-          )}
-
-          {isPDRTracking && (
-                    <TouchableOpacity
-              style={[styles.pdrCardButton, styles.pdrCardButtonReset]}
-              onPress={resetPDR}
-            >
-              <Text style={styles.pdrCardButtonIcon}>🔄</Text>
-              <Text style={styles.pdrCardButtonText}>Reset</Text>
-                    </TouchableOpacity>
-          )}
-
-          {/* Manual PDR initialization button */}
-          {!isPDRTracking && selectedBuilding && pois && pois.length > 0 && (
-            <TouchableOpacity
-              style={[styles.pdrCardButton, styles.pdrCardButtonInit]}
-              onPress={() => {
-                try {
-                  initializePDRBuilding(selectedBuilding, pois);
                   startPDRTracking();
-                } catch (error) {
-                  // console.error('Manual PDR initialization failed:', error);
-                  Alert.alert('PDR Initialization Failed', 'Please check POI coordinates and try again.');
-                }
-              }}
-            >
-              <Text style={styles.pdrCardButtonIcon}>🔧</Text>
-              <Text style={styles.pdrCardButtonText}>Init PDR</Text>
-            </TouchableOpacity>
-          )}
+          }
+        }}
+        onPDRReset={() => {
+          // Stop PDR tracking if active
+          if (isPDRTracking) {
+            stopPDRTracking();
+          }
+          
+          // Reset PDR completely
+          resetPDR();
+          
+          // Clear PDR state
+          setPdrStartPosition(null);
+          setPdrAnimatedRegion(null);
+          setIsPdrPointerInitialized(false);
+          setLastCalibratedPOI(null);
+          
+          // Show confirmation
+          Alert.alert(
+            'PDR Reset',
+            'PDR has been reset successfully. You can start fresh tracking.',
+            [{ text: 'OK' }]
+          );
+        }}
+        onRouteToggle={auditSession?.session_status === 'active' ? stopNavigation : startNavigation}
+        onShowHelp={() => setShowInstructions(true)}
+        isPDRTracking={isPDRTracking}
+        selectedRoute={selectedRoute}
+        auditSession={auditSession}
+      />
 
 
-
-
-          {selectedRoute && (
-                      <TouchableOpacity
-              style={[styles.pdrCardButton, styles.pdrCardButtonNav]}
-              onPress={
-                navigationState?.isActive ? stopNavigation : startNavigation
-              }
-            >
-              <Text style={styles.pdrCardButtonIcon}>
-                {navigationState?.isActive ? '⏹️' : '🚀'}
-              </Text>
-              <Text style={styles.pdrCardButtonText}>
-                {navigationState?.isActive ? 'Stop' : 'Start'} Route
-                        </Text>
-                      </TouchableOpacity>
-          )}
-
-          {false && (selectedBuilding && selectedFloor) && (
-                  <TouchableOpacity
-                    style={[
-                styles.pdrCardButton,
-                floorPlan
-                  ? styles.pdrCardButtonActive
-                  : styles.pdrCardButtonInactive,
-              ]}
-              onPress={() => {
-                if (floorPlan) {
-                  clearFloorPlan();
-                } else if (selectedBuilding && selectedFloor) {
-                  const buildingId = selectedBuilding.id || selectedBuilding.bu_code;
-                  if (buildingId) {
-                    loadFloorPlan(buildingId, selectedFloor);
-                  }
-                }
-              }}
-            >
-              <Text style={styles.pdrCardButtonIcon}>
-                {floorPlan ? '🏢' : '📐'}
-              </Text>
-              <Text style={styles.pdrCardButtonText}>
-                {floorPlan ? 'Hide Floor Plan' : 'Show Floor Plan'}
-              </Text>
-                  </TouchableOpacity>
-          )}
-
-          {auditSession?.session_status === 'active' && (
-                  <TouchableOpacity
-              style={[styles.pdrCardButton, styles.pdrCardButtonEnd]}
-              onPress={endAuditSession}
-                  >
-              <Text style={styles.pdrCardButtonIcon}>🏁</Text>
-              <Text style={styles.pdrCardButtonText}>End Session</Text>
-                  </TouchableOpacity>
-          )}
-        </View>
-                </View>
-
-      {/* PDR Values Display - Hogent Style */}
-      {isPDRTracking && pdrPosition && (
+      {/* PDR Values Display - Hogent Style (Legacy) */}
+      {false && isPDRTracking && pdrPosition && (
         <View style={styles.pdrValuesOverlay}>
           <Text style={styles.pdrValuesTitle}>📍 Live PDR Data</Text>
           <View style={styles.pdrValuesGrid}>
@@ -1618,6 +1855,9 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
           scrollEnabled={true}
           rotateEnabled={true}
           pitchEnabled={true}
+          onMapReady={() => {
+            setIsMapReady(true);
+          }}
         >
           {/* Building Markers */}
           {buildings.map((building, index) => {
@@ -1639,15 +1879,13 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
             );
           })}
 
+
           {/* Floorplan Overlay */}
           {floorPlan && floorPlan.floor_plan_base64_data && (
-            <>
-              {/* console.log('MapScreen passing bounds to FloorPlanOverlay:', {
-                northEast: { lat: floorPlan.top_right_lat, lng: floorPlan.top_right_lng },
-                southWest: { lat: floorPlan.bottom_left_lat, lng: floorPlan.bottom_left_lng }
-              }) */}
               <FloorPlanOverlay
-                imageUri={`data:image/png;base64,${floorPlan.floor_plan_base64_data}`}
+              imageUri={floorPlan.floor_plan_base64_data.startsWith('data:') 
+                ? floorPlan.floor_plan_base64_data 
+                : `data:image/png;base64,${floorPlan.floor_plan_base64_data}`}
                 bounds={{
                   northEast: {
                     latitude: floorPlan.top_right_lat,
@@ -1660,7 +1898,6 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
                 }}
                 visible={true}
               />
-            </>
           )}
 
           {/* Audit Route Polyline */}
@@ -1675,17 +1912,30 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
 
 
   {/* Dynamic Navigation Path - Shows progress from current POI to next POI */}
-  {isNavigating && getDynamicPathProgress().length > 1 && (
+  {(() => {
+    const hasSession = !!auditSession;
+    const pathCoords = getDynamicPathProgress();
+    const hasPath = pathCoords.length > 1;
+    
+    console.log('🟢 Green line check:', {
+      hasSession,
+      pathCoordsLength: pathCoords.length,
+      hasPath,
+      pathCoords
+    });
+    
+    return hasSession && hasPath ? (
     <Polyline
-      coordinates={getDynamicPathProgress()}
+        coordinates={pathCoords}
       strokeColor="#00FF00"
       strokeWidth={6}
       lineDashPattern={[8, 4]}
     />
-  )}
+    ) : null;
+  })()}
 
   {/* Remaining Path - Shows remaining path to next POI */}
-  {isNavigating && getNavigationPathCoordinates().length > 1 && (() => {
+  {auditSession && getNavigationPathCoordinates().length > 1 && (() => {
     const progressPath = getDynamicPathProgress();
     const fullPath = getNavigationPathCoordinates();
     
@@ -1708,36 +1958,45 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   })()}
 
 
-  {/* PDR BREADCRUMB TRAIL - Shows your actual path walked */}
-  {isPDRTracking && pdrStartPosition && getCompletePDRPath().length > 1 && (
-    <Polyline
-      coordinates={getCompletePDRPath()}
-      strokeColor="#FF0000"
-      strokeWidth={6}
-      lineDashPattern={[3, 3]}
-    />
-  )}
-
-
-
-  {/* PDR BREADCRUMB MARKERS - Small dots along the path */}
-  {isPDRTracking && pdrStartPosition && pathHistory && pathHistory.map((point, index) => {
-    const latOffset = point.x * 0.00001;
-    const lngOffset = point.y * 0.00001;
+  {/* PDR WALKING PATH - Shows recent walking path like Google Maps */}
+  {(() => {
+    const path = getRecentWalkingPath();
     
+    // Show path if we have PDR data, or show a test path if PDR is tracking but no history
+    if (isPDRTracking && pdrStartPosition) {
+      if (path.length > 1) {
+        return (
+    <Polyline
+            coordinates={path}
+      strokeColor="#FF0000"
+            strokeWidth={12}
+            lineCap="round"
+            lineJoin="round"
+          />
+        );
+      } else if (pathHistory && pathHistory.length === 0) {
+        // Show a test path to verify polyline is working
+        const testPath = [
+          { latitude: pdrStartPosition.latitude, longitude: pdrStartPosition.longitude },
+          { 
+            latitude: pdrStartPosition.latitude + 0.0001, 
+            longitude: pdrStartPosition.longitude + 0.0001 
+          }
+        ];
                       return (
-      <Marker
-        key={`breadcrumb-${index}`}
-        coordinate={{
-          latitude: pdrStartPosition.latitude + latOffset,
-          longitude: pdrStartPosition.longitude + lngOffset
-        }}
-        anchor={{ x: 0.5, y: 0.5 }}
-      >
-        <View style={styles.breadcrumbMarker} />
-      </Marker>
-    );
-  })}
+          <Polyline
+            coordinates={testPath}
+            strokeColor="#00FF00"
+            strokeWidth={6}
+            lineCap="round"
+            lineJoin="round"
+          />
+        );
+      }
+    }
+    
+    return null;
+  })()}
 
   {/* LIVE USER COMPASS MARKER - Single marker showing user position and direction */}
   {((isPDRTracking && pdrPosition && pdrStartPosition)) && (() => {
@@ -1750,15 +2009,17 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
       finalHeading = ((finalHeading % 360) + 360) % 360;
     }
     
+    const currentCoords = {
+      latitude: pdrStartPosition.latitude + ((pdrPosition?.x || 0) * 0.0000005),
+      longitude: pdrStartPosition.longitude + ((pdrPosition?.y || 0) * 0.0000005)
+    };
+    
     return (
       <CompassNeedleMarker
         key="live-user-compass"
-        coordinate={{
-          latitude: pdrStartPosition.latitude + ((pdrPosition?.x || 0) * 0.00001),
-          longitude: pdrStartPosition.longitude + ((pdrPosition?.y || 0) * 0.00001)
-        }}
+        coordinate={currentCoords}
         heading={finalHeading}
-        size={32}
+        size={16}
         showDebug={false}
       />
     );
@@ -1811,12 +2072,18 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
   })}
 
 
-  {/* Static POI Markers (when not navigating) */}
-  {!isNavigating && pois.map((poi, index) => {
+  {/* Static POI Markers (when not navigating) - TEMPORARILY ALWAYS SHOW */}
+  {pois.map((poi, index) => {
     if (!poi) return null;
 
     const coordinates = getTransformedPOICoordinates(poi);
-    if (!coordinates) return null;
+    
+    if (!coordinates) {
+      return null;
+    }
+
+    // Check if this is the last calibrated POI
+    const isLastCalibrated = lastCalibratedPOI && (lastCalibratedPOI.id === poi.id || lastCalibratedPOI.puid === poi.puid);
 
     return (
       <Marker
@@ -1824,7 +2091,7 @@ const MapScreen: React.FC<MapScreenProps> = ({ navigation, route }) => {
         coordinate={coordinates}
         title={poi.name || poi.title || 'POI'}
         description={poi.description || poi.pois_type || poi.type || 'Point of Interest'}
-        pinColor="#2196F3"
+        pinColor={isLastCalibrated ? '#FFD700' : '#2196F3'}
         onPress={() => {
           Alert.alert(
             poi.name || poi.title || 'POI',
@@ -2237,6 +2504,225 @@ const styles = StyleSheet.create({
   },
   floorButtonTextSelected: {
     color: 'white',
+  },
+  // New Collapsible Session Header Styles
+  sessionHeader: {
+    backgroundColor: '#1a1a1a',
+    margin: 10,
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+    overflow: 'hidden',
+  },
+  sessionHeaderBar: {
+    backgroundColor: '#2a2a2a',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  sessionHeaderBarContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  sessionHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  sessionHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  sessionHeaderContent: {
+    padding: 16,
+  },
+  sessionStatusBadge: {
+    backgroundColor: '#ff4444',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  sessionStatusText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  sessionProgressBadge: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  sessionProgressText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  sessionIdText: {
+    color: '#ccc',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    marginRight: 8,
+  },
+  sessionCurrentPOI: {
+    color: '#FFD700',
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginLeft: 8,
+  },
+  collapseIcon: {
+    color: '#888',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  currentPOIRow: {
+    backgroundColor: '#2a2a2a',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: '#FFD700',
+  },
+  currentPOILabel: {
+    color: '#FFD700',
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  currentPOIName: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  sessionCompleteRow: {
+    backgroundColor: '#2a2a2a',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: '#4CAF50',
+  },
+  sessionCompleteText: {
+    color: '#4CAF50',
+    fontSize: 14,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  pdrDataRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    backgroundColor: '#2a2a2a',
+    padding: 12,
+    borderRadius: 8,
+  },
+  pdrDataColumn: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  pdrDataLabel: {
+    color: '#888',
+    fontSize: 10,
+    marginBottom: 4,
+  },
+  pdrDataValue: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
+  },
+  // Floating Session Button
+  floatingSessionButton: {
+    position: 'absolute',
+    top: 60,
+    right: 20,
+    backgroundColor: '#1a1a1a',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 25,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+    borderWidth: 2,
+    borderColor: '#ff4444',
+    minWidth: 120,
+    alignItems: 'center',
+  },
+  floatingSessionButtonText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  floatingSessionButtonPOI: {
+    color: '#FFD700',
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  // Live PDR Section Styles (Legacy)
+  livePDRSection: {
+    backgroundColor: '#1a1a1a',
+    margin: 10,
+    borderRadius: 12,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  livePDRHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  livePDRTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  livePDRStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  livePDRIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#00FF00',
+    marginRight: 6,
+  },
+  livePDRStatusText: {
+    color: '#00FF00',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  livePDRData: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  livePDRDataItem: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  livePDRDataLabel: {
+    color: '#888',
+    fontSize: 10,
+    marginBottom: 4,
+  },
+  livePDRDataValue: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+    fontFamily: 'monospace',
   },
 });
 

@@ -87,7 +87,6 @@ export class HogentPDRService {
 
     this.isTracking = true;
     this.setupSensors();
-    console.log(`🧭 PDR Started - Mode: ${this.useCompassHeading ? 'Compass' : 'Magnetometer'}`);
   }
 
   stopTracking(): void {
@@ -99,7 +98,6 @@ export class HogentPDRService {
       CompassHeading.stop();
       this.compassSubscription = null;
     }
-    console.log('🛑 PDR Stopped');
   }
 
   private setupSensors(): void {

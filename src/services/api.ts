@@ -3,7 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { User, Building, AuditRoute, POI } from '../types';
 
 // API Configuration
-const API_BASE_URL = 'http://167.99.236.54:9000/api'; // Your server IP
+const API_BASE_URL = 'http://167.99.236.54:9000/api'; // Remote server
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -130,6 +130,59 @@ export const auditAPI = {
   endAuditSession: async (sessionId: string): Promise<{ status: string }> => {
     const response = await api.post('/auditor/session/end', { session_id: sessionId });
     return response.data;
+  },
+
+  getNextPOI: async (sessionId: string): Promise<{ 
+    poi: any; 
+    is_complete: boolean; 
+    progress: { completed: number; total: number; remaining: number; }
+  }> => {
+    try {
+      // Try the new endpoint first (if available on server)
+      const response = await api.get(`/auditor/session/${sessionId}/next-poi`);
+      return response.data;
+    } catch (error: any) {
+      if (error.response?.status === 404 || error.response?.status === 400) {
+        // Fallback: Get session data and determine next POI manually
+        const sessionData = await api.get(`/auditor/session/${sessionId}`);
+        const session = sessionData.data;
+        
+        // Get the route data
+        const routeData = await api.get(`/auditor/route/${session.route_id}`);
+        const route = routeData.data;
+        
+        // Find next POI to scan
+        const completedPOIs = session.completed_pois || [];
+        const allPOIs = route.pois || [];
+        
+        const nextPOI = allPOIs.find((poi: any) => 
+          !completedPOIs.includes(poi.puid)
+        );
+        
+        if (nextPOI) {
+          return {
+            poi: nextPOI,
+            is_complete: false,
+            progress: {
+              completed: completedPOIs.length,
+              total: allPOIs.length,
+              remaining: allPOIs.length - completedPOIs.length
+            }
+          };
+        } else {
+          return {
+            poi: {},
+            is_complete: true,
+            progress: {
+              completed: completedPOIs.length,
+              total: allPOIs.length,
+              remaining: 0
+            }
+          };
+        }
+      }
+      throw error;
+    }
   },
 };
 
